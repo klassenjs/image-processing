@@ -1,0 +1,14 @@
+1) Multiply all bands together
+2) Mask out center of photo
+3) Look for MAX value otherwise and report px location
+4) -- maybe calculate the gradient too to verify?
+
+3b) use 2D coorelation detector tuned for a point
+   and record poistion of max response?
+
+60% overlap means we expect to find the CPP about 10% from an edge
+
+0 1 2 3 4 5 6 7 8 9 0
+        0 1 2 3 4 5 6 7 8 9 0
+
+So we can mask out the middle third (33% - 66%) to half (25% - 75%)

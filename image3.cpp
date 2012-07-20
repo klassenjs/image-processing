@@ -1,7 +1,9 @@
 /*
 g++ -I/Applications-POSIX/osgeo/include -I/opt/local/include -L/Applications-POSIX/osgeo/lib -L/opt/local/lib -lgdal -lproj -lfftw3f -lfftw3f_threads -lm -O2 image.cpp -o image
 
-g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr/include/gdal
+g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr/include/gdal -L/home/jimk/PPP/local/lib -lopencv_core -lopencv_calib3d -lopencv_imgproc -lopencv_highgui -lopencv_contrib -I/home/jimk/PPP/local/include -Wl,-R -Wl,'/home/jimk/PPP/local/lib'
+
+g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr/include/gdal -L/home/jimk/PPP/local/lib -lopencv_core -lopencv_calib3d -lopencv_imgproc -lopencv_highgui -lopencv_contrib -I/home/jimk/PPP/local/include -Wl,-R -Wl,'/home/jimk/PPP/local/lib' -g
 */
 
 #include <stdexcept>
@@ -9,12 +11,22 @@ g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr
 #include <proj_api.h>
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/ts/ts.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/contrib/contrib.hpp>
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "/usr/include/complex.h"
 #include <math.h>
 #include <fftw3.h>
+
+
+
 
 #ifndef CORES
  #define CORES 2
@@ -47,9 +59,13 @@ GDALDataset* CreateOutputDataset(char* fileName, int width, int height, int band
 	GDALDriver *gd = gdm->GetDriverByName("GTiff");
 	if(gd == NULL)
 		error("Get GTiff Driver failed!");
+	
+	const char* ib = "INTERLEAVE=BAND"; // there must be a cleaner way...
+	char ib2[20];
+	strncpy(ib2, ib, 20);
 
 	char* options[2];
-	options[0] = "INTERLEAVE=BAND";
+	options[0] = ib2; //"INTERLEAVE=BAND";
 	options[1] = NULL;
 	
 	GDALDataset *dstDS = gd->Create(fileName, width, height, bands, GDT_Float32, options);
@@ -94,27 +110,6 @@ void fft2shift(float *x, int width, int height )
 inline void runFFT(fftwf_plan plan, GDALDataset *srcDS, complex float *img, int band, struct Rect bbox, int width, int height)
 {
 	const size_t px_count = width * height;
-
-	/* Need to pad src bbox if out of bounds */
-	//int src_width = srcDS->GetRasterXSize();
-	//int src_height = srcDS->GetRasterYSize();
-	
-	//struct Rect src_bbox;
-	
-	//src_bbox.minx = MY_MAX(bbox.minx, 0);
-	//src_bbox.miny = MY_MAX(bbox.miny, 0);
-	//int maxx = MY_MIN(bbox.minx + bbox.width, src_width);
-	//int maxy = MY_MIN(bbox.miny + bbox.height, src_height);
-	//src_bbox.width = maxx - src_bbox.minx;
-	//src_bbox.height = maxy - src_bbox.miny;
-	
-	//int x_offset = 0;//MY_MAX(src_bbox.minx - bbox.minx, 0);
-	//int y_offset = 0;//MY_MAX(src_bbox.miny - bbox.miny, 0);
-	
-	//printf("minx: %d, miny: %d, width: %d, height %d, x_offset: %d, y_offset: %d\n",
-	//       src_bbox.minx, src_bbox.miny, src_bbox.width, src_bbox.height, x_offset, y_offset);
-
-	//complex float* img2 = img + width * y_offset;
 
 	for(int i = 0 ; i < px_count; i++)
 	  img[i] = 0.0;
@@ -277,7 +272,66 @@ void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
 
 }
 
-int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2, const int initial_offset_x, const int initial_offset_y)
+void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, struct Rect bbox2, int offset_x, int offset_y)
+{
+  /* Calculate size of output image */
+  
+  int minx = MY_MIN(bbox1.minx, bbox2.minx + offset_x);
+  int miny = MY_MIN(bbox1.miny, bbox2.miny + offset_y);
+  int maxx = MY_MAX(bbox1.minx+bbox1.width, bbox2.minx+bbox2.width+offset_x);
+  int maxy = MY_MAX(bbox1.miny+bbox1.height, bbox2.miny+bbox2.height+offset_y);
+
+  int width = maxx-minx;
+  int height = maxy-miny;
+
+  std::vector<cv::Mat> im;
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
+
+  unsigned char* img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  srcDS1->GetRasterBand(1)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img1, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+
+  int dx = bbox1.minx - minx;
+  int dy = bbox1.miny - miny;
+  for(int y = 0; y < bbox1.height; y++) {
+    for(int x = 0; x < bbox1.width; x++) {
+      int px = x + y*bbox1.width;
+      unsigned char px_val = img1[px];
+      im[0].at<unsigned char>(y+dy, x+dx) = px_val;
+      im[1].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img1);
+
+  unsigned char* img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  srcDS2->GetRasterBand(1)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
+				   bbox2.width, bbox2.height,
+				   img2, bbox2.width, bbox2.height,
+				   GDT_Byte, 0, 0);
+
+  dx = bbox2.minx+offset_x - minx;
+  dy = bbox2.miny+offset_y - miny;
+  for(int y = 0; y < bbox2.height; y++) {
+    for(int x = 0; x < bbox2.width; x++) {
+      int px = x + y*bbox2.width;
+      unsigned char px_val = img2[px];
+      im[2].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img2);
+
+  cv::Mat img = cv::Mat(height, width, CV_8UC3);
+  cv::merge(im, img);
+  cv::namedWindow("match", CV_WINDOW_NORMAL|CV_WINDOW_KEEPRATIO|CV_GUI_EXPANDED);
+  cv::imshow("match", img);
+  cv::waitKey(100);
+}
+
+int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2)
 {
 	struct Rect r1, r2;
 
@@ -295,49 +349,80 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 
 	float max = findOffset(srcDS1, srcDS2, bbox1, bbox2, width, height, &offset_x, &offset_y);
 
-	offset_x += initial_offset_x;
-	offset_y += initial_offset_y;
 
-	printf("\t%d\t%d\t%f\n", offset_x, offset_y, max);
+	/* Find overlap between images */
+	int initial_offset_x = bbox1.minx - bbox2.minx;
+	int initial_offset_y = bbox1.miny - bbox2.miny;
+	int total_offset_x = initial_offset_x + offset_x;
+	int total_offset_y = initial_offset_y + offset_y;
 
-	if(bbox1.width > 64 && bbox1.height > 64 && bbox2.width > 64 && bbox2.height > 64 && max > 0.75) {
+	struct Rect overlap; /* in cs of srcDS1 */
+	overlap.minx = MY_MAX(bbox1.minx, bbox2.minx + total_offset_x);
+	overlap.miny = MY_MAX(bbox1.miny, bbox2.miny + total_offset_y);
+
+	int maxx = MY_MIN(bbox1.minx + bbox1.width, bbox2.minx + total_offset_x + bbox2.width);
+	int maxy = MY_MIN(bbox1.miny + bbox1.height, bbox2.miny + total_offset_y + bbox2.height);
+	overlap.width = maxx - overlap.minx;
+	overlap.height = maxy - overlap.miny;
+
+	if(overlap.width <= 0 || overlap.height <= 0) {
+	  error("no overlap");
+	}
+	
+	struct Rect overlap2; /* in cs of srcDS2 */
+       	overlap2.minx = overlap.minx - (total_offset_x);
+	if(overlap2.minx < 0) {
+	  overlap.minx = overlap.minx - overlap2.minx;
+	  overlap.width = overlap.width - overlap2.minx;
+	  overlap2.minx = 0;
+	}
+
+	overlap2.miny = overlap.miny - (total_offset_y);
+	if(overlap2.miny < 0) {
+	  overlap.miny = overlap.miny - overlap2.miny;
+	  overlap.height = overlap.height - overlap2.miny;
+	}
+
+	maxx = srcDS2->GetRasterXSize() - (overlap2.minx + overlap.width);
+	if(maxx < 0) {
+	  overlap.width = overlap.width - maxx;
+	}
+
+	maxy = srcDS2->GetRasterYSize() - (overlap2.miny + overlap.height);
+	if(maxy < 0) {
+	  overlap.height = overlap.height - maxy;
+	}
+	
+	overlap2.width = overlap.width;
+	overlap2.height = overlap.height;
+
+	printf("overlap: %d %d %d %d\n", overlap.minx, overlap.miny, overlap.minx+overlap.width, overlap.miny+overlap.height);
+	printf("overlap2: %d %d %d %d\n", overlap2.minx, overlap2.miny, overlap2.minx+overlap2.width, overlap2.miny+overlap2.height);
+
+	printf("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
+
+	if(overlap.width > 400)
+	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
+
+	if(overlap.width > 64 && overlap.height > 64 && max > 0.75) {
 		// Quarter and try compute again.
 
 		for(int i = 1; i <= 4; i++) {
-			newBBox(i, &bbox1, &r1);	
-			newBBox(i, &bbox2, &r2);
+			newBBox(i, &overlap, &r1);	
+			newBBox(i, &overlap2, &r2);
 
-			/* Center search on expected area based on last try */
-			r2.minx += offset_x; 
-			r2.miny += offset_y;
-
-			/* Make sure we don't go off the edge of the image */
-			if(r2.minx < 0) {
-			  offset_x = offset_x - r2.minx;
-			  r2.minx = 0;
-			}
-			if(r2.miny < 0) {
-			  offset_y = offset_y - r2.miny;
-			  r2.miny = 0;
-			}
-			if(r2.minx + r2.width > src_width) {
-			  offset_x = offset_x + r2.minx - (r2.width - src_width); //?
-			  r2.minx =  r2.width - src_width;
-			}
-			if(r2.miny + r2.height > src_height) {
-			  offset_y = offset_y + r2.miny - (r2.height - src_height); //?
-			  r2.miny = r2.height - src_height;
-			}
-
-       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2, offset_x, offset_y);
+       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
 		}
 	} else {
-		// Final Answer
-		printf("(%d, %d) offset (%d, %d)\n", bbox1.minx + bbox1.width/2, bbox1.miny + bbox1.width/2, offset_x, offset_y);
+	  // Final Answer
+	  int dx = overlap.minx + overlap.width/2 - overlap2.minx + overlap2.width/2;
+	  int dy = overlap.miny + overlap.height/2 - overlap2.miny + overlap2.height/2;
+	  printf("(%d, %d) -> (%d, %d)\n", overlap.minx + overlap.width/2, overlap.miny + overlap.height/2,
+		  overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
-		float disparity = sqrtf( offset_x * offset_x + offset_y * offset_y );
-		dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
-			   &disparity, 1, 1, GDT_CFloat32, 0, 0);
+	  float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
+	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, overlap.minx, overlap.miny, overlap.width, overlap.height,
+					     &disparity, 1, 1, GDT_CFloat32, 0, 0);
 
 	}
 
@@ -391,7 +476,7 @@ int main(int argc, char** argv)
 
 	dstDS = CreateOutputDataset(dstFileName, bbox1.width, bbox1.height, 1);
 
-	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2, 0, 0);
+	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2);
 
 	delete srcDS1;
 	delete srcDS2;

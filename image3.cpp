@@ -368,7 +368,11 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	if(overlap.width <= 0 || overlap.height <= 0) {
 	  error("no overlap");
 	}
-	
+	//overlap.minx = bbox1.minx;
+	//overlap.miny = bbox1.miny;
+	//overlap.width = bbox1.width;
+	//overlap.height = bbox1.height;
+
 	struct Rect overlap2; /* in cs of srcDS2 */
        	overlap2.minx = overlap.minx - (total_offset_x);
 	if(overlap2.minx < 0) {
@@ -404,9 +408,8 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	if(overlap.width > 400)
 	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
 
-	if(overlap.width > 64 && overlap.height > 64 && max > 0.75) {
-		// Quarter and try compute again.
-
+	if(overlap.width > 32 && overlap.height > 32 && max > 0.75) {
+	  // Quarter and try compute again.
 		for(int i = 1; i <= 4; i++) {
 			newBBox(i, &overlap, &r1);	
 			newBBox(i, &overlap2, &r2);
@@ -421,7 +424,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 		  overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
 	  float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
-	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, overlap.minx, overlap.miny, overlap.width, overlap.height,
+	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
 					     &disparity, 1, 1, GDT_CFloat32, 0, 0);
 
 	}

@@ -6,34 +6,51 @@ g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr
 g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr/include/gdal -L/home/jimk/PPP/local/lib -lopencv_core -lopencv_calib3d -lopencv_imgproc -lopencv_highgui -lopencv_contrib -I/home/jimk/PPP/local/include -Wl,-R -Wl,'/home/jimk/PPP/local/lib' -g
 */
 
+
+/* Assumptions:
+ *   Lens distortion removed
+ *   Images rectified to each other
+ *   Images overlap > 50%
+ *   Most of image is valid (no large no-data areas)
+ */
+
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include <iostream>
 #include <stdexcept>
 #include <string>
+
+/* For n-band Image IO */
 #include <proj_api.h>
 #include <gdal_priv.h>
 #include <ogr_spatialref.h>
 
+/* For display and YAML */
 #include <opencv2/core/core.hpp>
 #include <opencv2/ts/ts.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/contrib/contrib.hpp>
 
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+/* For corelation = IFFT( FFT(A) * (i*FFT(B)) ) */ 
 #include "/usr/include/complex.h"
 #include <math.h>
 #include <fftw3.h>
 
 
-
-
 #ifndef CORES
- #define CORES 2
+ #define CORES (int)sysconf(_SC_NPROCESSORS_ONLN)
 #endif
+
 #define MY_MIN(a,b) (a<b)? a : b
 #define MY_MAX(a,b) (a>b)? a : b
 
+int gVERBOSE = 1;
+int gWAITKEY = 10;
 
 struct Rect {
 	int minx;
@@ -47,31 +64,18 @@ void error(const char* msg)
 {
 	throw(std::out_of_range(msg));
 	exit(0);
-} 
-
-
-GDALDataset* CreateOutputDataset(char* fileName, int width, int height, int bands)
-{
-	GDALDriverManager *gdm = GetGDALDriverManager();
-	if(gdm == NULL)
-		error("GetGDALDriverManager() failed!");
-
-	GDALDriver *gd = gdm->GetDriverByName("GTiff");
-	if(gd == NULL)
-		error("Get GTiff Driver failed!");
-	
-	const char* ib = "INTERLEAVE=BAND"; // there must be a cleaner way...
-	char ib2[20];
-	strncpy(ib2, ib, 20);
-
-	char* options[2];
-	options[0] = ib2; //"INTERLEAVE=BAND";
-	options[1] = NULL;
-	
-	GDALDataset *dstDS = gd->Create(fileName, width, height, bands, GDT_Float32, options);
-	
-	return dstDS;
 }
+
+void info(const char* fmt, ... ) {
+	va_list args;
+	va_start(args, fmt);
+	if(gVERBOSE) {
+		vprintf(fmt, args);
+	}
+	va_end(args);
+}
+
+
 
 
 
@@ -144,8 +148,6 @@ float findOffset(GDALDataset *srcDS1, GDALDataset *srcDS2, struct Rect bbox1, st
 	if(img1 == NULL || img2 == NULL || out == NULL)
 		error("Could not allocate memory\n");
 
-	if(fftwf_init_threads())
-		fftwf_plan_with_nthreads(CORES);
 
 	plan1 = fftwf_plan_dft_2d(height, width, 
 	                        img1, img1, FFTW_FORWARD, FFTW_ESTIMATE);
@@ -166,23 +168,23 @@ float findOffset(GDALDataset *srcDS1, GDALDataset *srcDS2, struct Rect bbox1, st
 
 	/* Calculate correlation for each band between the two images, multiply results of all bands */
 	for(band = 1; band <= n_bands; band++) {
-		printf("FFT 1 band %d\n", band);
+		info("FFT 1 band %d\n", band);
 		runFFT( plan1, srcDS1, img1, band, bbox1, width, height );
-		printf("FFT 2 band %d\n", band);
+		info("FFT 2 band %d\n", band);
 		runFFT( plan2, srcDS2, img2, band, bbox2, width, height );
 
 		
-		printf("Complex Conj band %d\n", band);
+		info("Complex Conj band %d\n", band);
 		/* mult img1 and conj of img2 */
 		for(int px = 0; px < px_count; px++) {
 			img2[px] = img1[px] * conj(img2[px]);
 		}
 	
 		/* IFFT of result */	
-		printf("IFFT band %d\n", band);
+		info("IFFT band %d\n", band);
 		fftwf_execute(planI);	
 
-		printf("normalize band %d\n", band);
+		info("normalize band %d\n", band);
 		complex float norm = csqrt(px_count + 0I);
 		float max = cabs(img2[0] / norm);
 		float min = cabs(img2[0] / norm);
@@ -195,7 +197,7 @@ float findOffset(GDALDataset *srcDS1, GDALDataset *srcDS2, struct Rect bbox1, st
 				max = cabs(img2[i]);
 		}
 		/* img2 should now be real - normalize 0.0-1.0 and -- write output */
-		//printf("Save band %d; min = %f max = %f\n", band, min, max);
+		//info("Save band %d; min = %f max = %f\n", band, min, max);
 		for(int i = 0; i < px_count; i++) {
 			out[i] = out[i] * ((cabs(img2[i]) - min) / (max-min) );
 		}
@@ -244,33 +246,7 @@ float findOffset(GDALDataset *srcDS1, GDALDataset *srcDS2, struct Rect bbox1, st
 }
 
 
-void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
-{
-	out->width = in->width / 2;
-	out->height = in->height / 2;
-	switch(quadrant) {
-		case 1:
-			out->minx = in->minx + (in->width)/2;
-			out->miny = in->miny + (in->height)/2;
-			break;
-		case 2:
-			out->minx = in->minx;
-			out->miny = in->miny + (in->height)/2;
-			break;
-		case 3:
-			out->minx = in->minx;
-			out->miny = in->miny;
-			break;
-		case 4:
-			out->minx = in->minx + (in->width)/2;
-			out->miny = in->miny;
-			break;
-		default:
-			out->minx = in->minx;
-			out->miny = in->miny;
-	}
 
-}
 
 void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, struct Rect bbox2, int offset_x, int offset_y)
 {
@@ -328,7 +304,108 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
   cv::merge(im, img);
   cv::namedWindow("match", CV_WINDOW_NORMAL|CV_WINDOW_KEEPRATIO|CV_GUI_EXPANDED);
   cv::imshow("match", img);
-  cv::waitKey(100);
+  cv::waitKey(gWAITKEY);
+}
+
+
+/* calculateXYZ()
+ * Inputs: 
+ *    M1, M2 - Camera matricies
+ *    R1, R2 - Rotation matrices
+ *    t1, t2 - Translation vectors
+ *    u1, u2 - column pixel coordinate
+ *    v1, v2 - row pixel coordinate
+ * Outputs:
+ *    X, Y, Z - estimated position in 3D world space
+ */
+void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1, 
+		  cv::Mat M2, cv::Mat R2, cv::Mat t2, 
+		  int u1, int v1, int u2, int v2,
+		  float* X, float* Y, float* Z)
+{
+  cv::Mat Rt1 = cv::Mat(3,4,CV_32F);
+  cv::Mat Rt1R = Rt1.colRange(0,3);
+  cv::Mat Rt1t = Rt1.col(3);
+  R1.copyTo( Rt1R );
+  t1.copyTo( Rt1t );
+
+  cv::Mat Rt2 = cv::Mat(3,4,CV_32F);
+  cv::Mat Rt2R = Rt2.colRange(0,3);
+  cv::Mat Rt2t = Rt2.col(3);
+  R2.copyTo( Rt2R );
+  t2.copyTo( Rt2t );
+
+  std::cout << "Rt1:" << Rt1 << std::endl << "Rt2:" << Rt2 << std::endl;
+
+  cv::Mat P1, P2;
+  P1 = (M1 * Rt1);
+  P2 = (M2 * Rt2);
+ 
+  std::cout << "P1:" << P1 << std::endl;
+
+  cv::Mat uv1 = (cv::Mat_<float>(3,1) << u1, v1, 1);
+  cv::Mat uv2 = (cv::Mat_<float>(3,1) << u2, v2, 1);
+  cv::Mat xyz1, xyz2;
+  xyz1 = P1.inv() * uv1;
+  xyz2 = P2.inv() * uv2;
+
+  std::cout << xyz1 << std::endl << xyz2 << std::endl;
+}
+
+void testXYZ()
+{
+  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
+  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
+
+  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
+  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+
+  float X,Y,Z;
+  int u1,v1,u2,v2;
+  u1 = 0;
+  v1 = 0;
+  u2 = -3000;
+  v2 = 0;
+
+  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+
+}
+
+void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
+{
+	out->width = in->width / 2;
+	out->height = in->height / 2;
+
+	/* Avoid Gaps */
+	if(2 * out->width < in->width)
+		out->width++;
+	if(2 * out->height < in->height)
+		out->height++;
+
+	switch(quadrant) {
+		case 1:
+			out->minx = in->minx + (in->width)/2;
+			out->miny = in->miny + (in->height)/2;
+			break;
+		case 2:
+			out->minx = in->minx;
+			out->miny = in->miny + (in->height)/2;
+			break;
+		case 3:
+			out->minx = in->minx;
+			out->miny = in->miny;
+			break;
+		case 4:
+			out->minx = in->minx + (in->width)/2;
+			out->miny = in->miny;
+			break;
+		default:
+			out->minx = in->minx;
+			out->miny = in->miny;
+	}
+
 }
 
 int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2)
@@ -345,7 +422,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	width = MY_MAX(bbox1.width, bbox2.width);
 	height = MY_MAX(bbox1.height, bbox2.height);
 
-	printf("Processing: (%d,%d) w: %d h: %d\n", bbox1.minx, bbox1.miny, bbox1.width, bbox1.height);
+	info("Processing: (%d,%d) w: %d h: %d\n", bbox1.minx, bbox1.miny, bbox1.width, bbox1.height);
 
 	float max = findOffset(srcDS1, srcDS2, bbox1, bbox2, width, height, &offset_x, &offset_y);
 
@@ -357,21 +434,17 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	int total_offset_y = initial_offset_y + offset_y;
 
 	struct Rect overlap; /* in cs of srcDS1 */
-	overlap.minx = MY_MAX(bbox1.minx, bbox2.minx + total_offset_x);
-	overlap.miny = MY_MAX(bbox1.miny, bbox2.miny + total_offset_y);
+	overlap.minx = MY_MAX(bbox1.minx, /*bbox2.minx +*/ total_offset_x);
+	overlap.miny = MY_MAX(bbox1.miny, /*bbox2.miny +*/ total_offset_y);
 
-	int maxx = MY_MIN(bbox1.minx + bbox1.width, bbox2.minx + total_offset_x + bbox2.width);
-	int maxy = MY_MIN(bbox1.miny + bbox1.height, bbox2.miny + total_offset_y + bbox2.height);
+	int maxx = MY_MIN(bbox1.minx + bbox1.width, total_offset_x + src_width /*bbox2.minx + total_offset_x + bbox2.width*/);
+	int maxy = MY_MIN(bbox1.miny + bbox1.height, total_offset_y + src_height /*bbox2.miny + total_offset_y + bbox2.height*/);
 	overlap.width = maxx - overlap.minx;
 	overlap.height = maxy - overlap.miny;
 
 	if(overlap.width <= 0 || overlap.height <= 0) {
 	  error("no overlap");
 	}
-	//overlap.minx = bbox1.minx;
-	//overlap.miny = bbox1.miny;
-	//overlap.width = bbox1.width;
-	//overlap.height = bbox1.height;
 
 	struct Rect overlap2; /* in cs of srcDS2 */
        	overlap2.minx = overlap.minx - (total_offset_x);
@@ -400,22 +473,38 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	overlap2.width = overlap.width;
 	overlap2.height = overlap.height;
 
-	printf("overlap: %d %d %d %d\n", overlap.minx, overlap.miny, overlap.minx+overlap.width, overlap.miny+overlap.height);
-	printf("overlap2: %d %d %d %d\n", overlap2.minx, overlap2.miny, overlap2.minx+overlap2.width, overlap2.miny+overlap2.height);
-
-	printf("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
+	info("overlap: %d %d %d %d\n", overlap.minx, overlap.miny, overlap.minx+overlap.width, overlap.miny+overlap.height);
+	info("overlap2: %d %d %d %d\n", overlap2.minx, overlap2.miny, overlap2.minx+overlap2.width, overlap2.miny+overlap2.height);
+	info("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
 
 	if(overlap.width > 400)
 	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
 
 	if(overlap.width > 32 && overlap.height > 32 && max > 0.75) {
-	  // Quarter and try compute again.
+
+		// Grid and compute again
+		int dim = MY_MIN(overlap.width, overlap.height);
+		dim = (dim / 2) + (dim % 1);
+		r1.width = r1.height = r2.width = r2.height = dim;
+
+		for(int j = 0; j < overlap.height; j=j+dim) {
+			for(int i = 0; i < overlap.width; i=i+dim) {
+				r1.minx = overlap.minx + i;
+				r1.miny = overlap.miny + j;
+				r2.minx = overlap2.minx + i;
+				r2.miny = overlap2.miny + j;
+	       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
+			}
+		}				
+/*
+	  	// Quarter and try compute again.
 		for(int i = 1; i <= 4; i++) {
 			newBBox(i, &overlap, &r1);	
 			newBBox(i, &overlap2, &r2);
 
        			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
 		}
+*/
 	} else {
 	  // Final Answer
 	  int dx = overlap.minx + overlap.width/2 - overlap2.minx + overlap2.width/2;
@@ -432,11 +521,42 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	return 0;
 }
 
+
+GDALDataset* CreateOutputDataset(char* fileName, int width, int height, int bands)
+{
+	GDALDriverManager *gdm = GetGDALDriverManager();
+	if(gdm == NULL)
+		error("GetGDALDriverManager() failed!");
+
+	GDALDriver *gd = gdm->GetDriverByName("GTiff");
+	if(gd == NULL)
+		error("Get GTiff Driver failed!");
+	
+	const char* ib = "INTERLEAVE=BAND"; // there must be a cleaner way...
+	char ib2[20];
+	strncpy(ib2, ib, 20);
+
+	char* options[2];
+	options[0] = ib2; //"INTERLEAVE=BAND";
+	options[1] = NULL;
+	
+	GDALDataset *dstDS = gd->Create(fileName, width, height, bands, GDT_Float32, options);
+	
+	return dstDS;
+}
+
 int main(int argc, char** argv)
 {
 	char* srcFileName1;
 	char* srcFileName2;
 	char* dstFileName;
+
+	//testXYZ();
+	//return(0);
+
+	info("Attempting to use %d cores for FFT\n", CORES);
+	if(fftwf_init_threads())
+		fftwf_plan_with_nthreads(CORES);
 
 	GDALDataset* srcDS1, *srcDS2, *dstDS;
 	
@@ -484,6 +604,8 @@ int main(int argc, char** argv)
 	delete srcDS1;
 	delete srcDS2;
 	delete dstDS;
+
+	fftwf_cleanup_threads();
 
 	return 0;	
 }

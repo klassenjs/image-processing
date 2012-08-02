@@ -266,9 +266,14 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
   im.push_back( cv::Mat::zeros(height, width, CV_8U) );
 
   unsigned char* img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
-  srcDS1->GetRasterBand(1)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+  unsigned char* img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  srcDS1->GetRasterBand(3)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
 				   bbox1.width, bbox1.height,
 				   img1, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+  srcDS1->GetRasterBand(2)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img2, bbox1.width, bbox1.height,
 				   GDT_Byte, 0, 0);
 
   int dx = bbox1.minx - minx;
@@ -278,12 +283,14 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
       int px = x + y*bbox1.width;
       unsigned char px_val = img1[px];
       im[0].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img2[px];
       im[1].at<unsigned char>(y+dy, x+dx) = px_val;
     }
   }
   free(img1);
+  free(img2);
 
-  unsigned char* img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
   srcDS2->GetRasterBand(1)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
 				   bbox2.width, bbox2.height,
 				   img2, bbox2.width, bbox2.height,
@@ -304,6 +311,11 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
   cv::merge(im, img);
   cv::namedWindow("match", CV_WINDOW_NORMAL|CV_WINDOW_KEEPRATIO|CV_GUI_EXPANDED);
   cv::imshow("match", img);
+
+  char saveName[1024];
+  snprintf(saveName, 1024, "snapshot_%d-%d_%d.jpg", bbox1.width, bbox1.minx, bbox1.miny);
+  cv::imwrite(saveName, img);
+
   cv::waitKey(gWAITKEY);
 }
 
@@ -458,6 +470,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	if(overlap2.miny < 0) {
 	  overlap.miny = overlap.miny - overlap2.miny;
 	  overlap.height = overlap.height - overlap2.miny;
+	  overlap2.miny = 0;
 	}
 
 	maxx = srcDS2->GetRasterXSize() - (overlap2.minx + overlap.width);
@@ -488,11 +501,13 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 		r1.width = r1.height = r2.width = r2.height = dim;
 
 		for(int j = 0; j < overlap.height; j=j+dim) {
+			int jj = j+dim > overlap.height ? overlap.height - dim : j;
 			for(int i = 0; i < overlap.width; i=i+dim) {
-				r1.minx = overlap.minx + i;
-				r1.miny = overlap.miny + j;
-				r2.minx = overlap2.minx + i;
-				r2.miny = overlap2.miny + j;
+				int ii = i+dim > overlap.width ? overlap.width - dim: i;
+				r1.minx = overlap.minx + ii;
+				r1.miny = overlap.miny + jj;
+				r2.minx = overlap2.minx + ii;
+				r2.miny = overlap2.miny + jj;
 	       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
 			}
 		}				

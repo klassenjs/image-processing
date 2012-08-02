@@ -490,13 +490,19 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	info("overlap2: %d %d %d %d\n", overlap2.minx, overlap2.miny, overlap2.minx+overlap2.width, overlap2.miny+overlap2.height);
 	info("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
 
-	if(overlap.width > 400)
+	if(overlap.width > 512)
 	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
 
 	if(overlap.width > 32 && overlap.height > 32 && max > 0.75) {
 
 		// Grid and compute again
 		int dim = MY_MIN(overlap.width, overlap.height);
+		{ /* Force to be a power of two makes the following loop more efficient */
+			unsigned char r = 0;
+			while( dim >>= 1 )
+				r++;
+			dim = 1 << r;
+		}	
 		dim = (dim / 2) + (dim % 1);
 		r1.width = r1.height = r2.width = r2.height = dim;
 

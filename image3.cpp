@@ -329,40 +329,114 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
  *    v1, v2 - row pixel coordinate
  * Outputs:
  *    X, Y, Z - estimated position in 3D world space
+ * Notes:
+ *    x, y, z - position in camera coordinate system
  */
 void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1, 
 		  cv::Mat M2, cv::Mat R2, cv::Mat t2, 
 		  int u1, int v1, int u2, int v2,
 		  float* X, float* Y, float* Z)
 {
-  cv::Mat Rt1 = cv::Mat(3,4,CV_32F);
-  cv::Mat Rt1R = Rt1.colRange(0,3);
-  cv::Mat Rt1t = Rt1.col(3);
-  R1.copyTo( Rt1R );
-  t1.copyTo( Rt1t );
+  // Inverse the projection direction
+  // OpenCV specifies [ camera_cs ] = R [ World_cs ] + t
+  // We need to calculate world coordinates from camera coordinates
+  // So Rnew = R'; tnew = R'(-t)
 
-  cv::Mat Rt2 = cv::Mat(3,4,CV_32F);
-  cv::Mat Rt2R = Rt2.colRange(0,3);
-  cv::Mat Rt2t = Rt2.col(3);
-  R2.copyTo( Rt2R );
-  t2.copyTo( Rt2t );
+//  std::cout << "R1: " << R1 << std::endl << "R1': " << R1.inv() << std::endl;  
+//  std::cout << "t1: " << t1 << std::endl << "t1': " << -R1.inv()*t1 << std::endl;  
+//  std::cout << "R2: " << R2 << std::endl << "R2': " << R2.inv() << std::endl;  
+//  std::cout << "t2: " << t2 << std::endl << "t2': " << -R2.inv()*t2 << std::endl;  
 
-  std::cout << "Rt1:" << Rt1 << std::endl << "Rt2:" << Rt2 << std::endl;
+  R1 = R1.inv();
+  t1 = -R1*t1;
+  R2 = R2.inv();
+  t2 = -R2*t2;
 
-  cv::Mat P1, P2;
-  P1 = (M1 * Rt1);
-  P2 = (M2 * Rt2);
- 
-  std::cout << "P1:" << P1 << std::endl;
+  // Calculate the "angles" of the line extending from the focal center to the point on the ground
+  float fx1 = M1.at<float>(0,0);  // Focal length
+  float fy1 = M1.at<float>(1,1);
+  float cx1 = M1.at<float>(2,0);  // Principle point
+  float cy1 = M1.at<float>(2,1);
 
-  cv::Mat uv1 = (cv::Mat_<float>(3,1) << u1, v1, 1);
-  cv::Mat uv2 = (cv::Mat_<float>(3,1) << u2, v2, 1);
-  cv::Mat xyz1, xyz2;
-  xyz1 = P1.inv() * uv1;
-  xyz2 = P2.inv() * uv2;
+  float fx2 = M2.at<float>(0,0);
+  float fy2 = M2.at<float>(1,1);
+  float cx2 = M2.at<float>(2,0);
+  float cy2 = M2.at<float>(2,1);
 
-  std::cout << xyz1 << std::endl << xyz2 << std::endl;
+  cv::Mat ang1 = (cv::Mat_<float>(3,1) << 
+	(u1 - cx1)/fx1,
+	(v1 - cy1)/fy1,
+	1 
+  );
+  cv::Mat ang2 = (cv::Mat_<float>(3,1) << 
+	(u2 - cx2)/fx2,
+	(v2 - cy2)/fy2,
+	1 
+  );  
+//  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
+
+  // Rotate into World CS
+  ang1 = R1 * ang1;
+  ang2 = R2 * ang2;
+
+//  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
+
+  cv::Mat world1 = cv::Mat::zeros(3,1,CV_32F);
+  cv::Mat world2 = cv::Mat::zeros(3,1,CV_32F);
+  float z1, z2;
+
+  // Note this is now a constrained optimization problem...  
+  // ... minimize the difference between world1 and world2.
+  // Overdetermined -- 3 eqns, 2 unknowns.  First reduce to 2 eqns, 1 unk.
+  //  then LSQ.
+
+  float error = -1;
+  for(z1 = 0.0; z1 > -10000.0; z1 -= 1.0) {
+    world1 = (z1 * ang1) + t1;
+
+    // Solve for z2 to match Z1 and Z2 given z1    
+    // world1 - t2 = z2 * ang2  |Z
+    z2 = (world1.at<float>(2) - t2.at<float>(2)) / ang2.at<float>(2);
+
+    world2 = (z2 * ang2) + t2;
+
+//    std::cout << "z1: " << z1 << std::endl;
+//    std::cout << "world1: " << world1 << std::endl << "world2: " << world2 << std::endl << std::endl;
+
+    float X1 = world1.at<float>(0);
+    float Y1 = world1.at<float>(1);
+    float X2 = world2.at<float>(0);
+    float Y2 = world2.at<float>(1);
+    float new_error = (X1-X2)*(X1-X2) + (Y1-Y2)*(Y1-Y2);
+//    std::cout << "err: " << new_error << std::endl;    
+
+    // Best so far...
+    if(error < 0 || new_error < error) {
+        *X = X1;
+        *Y = Y1;
+        *Z = world1.at<float>(2);
+	error = new_error;
+    }
+  }
+  return;
 }
+
+void testXYZ2(int u1, int v1, int u2, int v2)
+{
+  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
+  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
+
+  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
+  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+
+  float X,Y,Z;
+
+  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+  printf("FOUND: %f %f %f\n", X, Y, Z);
+}
+
 
 void testXYZ()
 {
@@ -382,7 +456,7 @@ void testXYZ()
   v2 = 0;
 
   calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
-
+  printf("FOUND: %f %f %f\n", X, Y, Z);
 }
 
 void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
@@ -420,6 +494,7 @@ void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
 
 }
 
+// Learning search algorithm
 int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2)
 {
 	struct Rect r1, r2;
@@ -533,6 +608,9 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	  printf("(%d, %d) -> (%d, %d)\n", overlap.minx + overlap.width/2, overlap.miny + overlap.height/2,
 		  overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
+          testXYZ2(overlap.minx + overlap.width/2, overlap.miny + overlap.height/2, 
+                   overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
+
 	  float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
 	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
 					     &disparity, 1, 1, GDT_CFloat32, 0, 0);
@@ -572,8 +650,8 @@ int main(int argc, char** argv)
 	char* srcFileName2;
 	char* dstFileName;
 
-	//testXYZ();
-	//return(0);
+//	testXYZ();
+//	return(0);
 
 	info("Attempting to use %d cores for FFT\n", CORES);
 	if(fftwf_init_threads())

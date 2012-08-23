@@ -332,8 +332,8 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
  * Notes:
  *    x, y, z - position in camera coordinate system
  */
-void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1, 
-		  cv::Mat M2, cv::Mat R2, cv::Mat t2, 
+void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1, 
+		  const cv::Mat M2, const cv::Mat R2, const cv::Mat t2, 
 		  int u1, int v1, int u2, int v2,
 		  float* X, float* Y, float* Z)
 {
@@ -347,10 +347,16 @@ void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1,
 //  std::cout << "R2: " << R2 << std::endl << "R2': " << R2.inv() << std::endl;  
 //  std::cout << "t2: " << t2 << std::endl << "t2': " << -R2.inv()*t2 << std::endl;  
 
-  R1 = R1.inv();
-  t1 = -R1*t1;
-  R2 = R2.inv();
-  t2 = -R2*t2;
+  // Need to copy results to new matrices otherwise args are modified.
+  cv::Mat R1p = cv::Mat::zeros(3,3, CV_32F);
+  cv::Mat R2p = cv::Mat::zeros(3,3, CV_32F);
+  cv::Mat t1p = cv::Mat::zeros(3,1, CV_32F);
+  cv::Mat t2p = cv::Mat::zeros(3,1, CV_32F);
+
+  R1p = R1.inv();
+  t1p = -R1p*t1;
+  R2p = R2.inv();
+  t2p = -R2p*t2;
 
   // Calculate the "angles" of the line extending from the focal center to the point on the ground
   float fx1 = M1.at<float>(0,0);  // Focal length
@@ -376,8 +382,8 @@ void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1,
 //  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
 
   // Rotate into World CS
-  ang1 = R1 * ang1;
-  ang2 = R2 * ang2;
+  ang1 = R1p * ang1;
+  ang2 = R2p * ang2;
 
 //  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
 
@@ -392,13 +398,13 @@ void calculateXYZ(cv::Mat M1, cv::Mat R1, cv::Mat t1,
 
   float error = -1;
   for(z1 = 0.0; z1 > -10000.0; z1 -= 1.0) {
-    world1 = (z1 * ang1) + t1;
+    world1 = (z1 * ang1) + t1p;
 
     // Solve for z2 to match Z1 and Z2 given z1    
     // world1 - t2 = z2 * ang2  |Z
-    z2 = (world1.at<float>(2) - t2.at<float>(2)) / ang2.at<float>(2);
+    z2 = (world1.at<float>(2) - t2p.at<float>(2)) / ang2.at<float>(2);
 
-    world2 = (z2 * ang2) + t2;
+    world2 = (z2 * ang2) + t2p;
 
 //    std::cout << "z1: " << z1 << std::endl;
 //    std::cout << "world1: " << world1 << std::endl << "world2: " << world2 << std::endl << std::endl;
@@ -434,6 +440,7 @@ void testXYZ2(int u1, int v1, int u2, int v2)
   float X,Y,Z;
 
   calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+
   printf("FOUND: %f %f %f\n", X, Y, Z);
 }
 
@@ -455,7 +462,9 @@ void testXYZ()
   u2 = -3000;
   v2 = 0;
 
+  std::cout << "R1 was: " << R1 << std::endl;
   calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+  std::cout << "R1 is: " << R1 << std::endl;
   printf("FOUND: %f %f %f\n", X, Y, Z);
 }
 
@@ -650,8 +659,8 @@ int main(int argc, char** argv)
 	char* srcFileName2;
 	char* dstFileName;
 
-//	testXYZ();
-//	return(0);
+	//testXYZ();
+	//return(0);
 
 	info("Attempting to use %d cores for FFT\n", CORES);
 	if(fftwf_init_threads())

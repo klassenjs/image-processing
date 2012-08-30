@@ -319,6 +319,38 @@ void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, s
   cv::waitKey(gWAITKEY);
 }
 
+float calculateXYZ2(
+	cv::Mat ang1, cv::Mat t1p, cv::Mat ang2, cv::Mat t2p,
+	float z1,
+	float *X, float *Y, float *Z)
+{
+  cv::Mat world1 = cv::Mat::zeros(3,1,CV_32F);
+  cv::Mat world2 = cv::Mat::zeros(3,1,CV_32F);
+
+  world1 = (z1 * ang1) + t1p;
+
+  // Solve for z2 to match Z1 and Z2 given z1    
+  // world1 - t2 = z2 * ang2  |Z
+  float z2 = (world1.at<float>(2) - t2p.at<float>(2)) / ang2.at<float>(2);
+
+  world2 = (z2 * ang2) + t2p;
+
+  float X1 = world1.at<float>(0);
+  float Y1 = world1.at<float>(1);
+  float X2 = world2.at<float>(0);
+  float Y2 = world2.at<float>(1);
+  float new_error = sqrt((X1-X2)*(X1-X2) + (Y1-Y2)*(Y1-Y2));
+
+  //std::cout << "z1,err:" << z1 << "\t" << new_error << std::endl;    
+  //std::cout << "world1: " << world1 << std::endl << "world2: " << world2 << std::endl << std::endl;
+
+  *X = X1;
+  *Y = Y1;
+  *Z = world1.at<float>(2);
+
+  return new_error;
+}
+
 
 /* calculateXYZ()
  * Inputs: 
@@ -372,57 +404,53 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   cv::Mat ang1 = (cv::Mat_<float>(3,1) << 
 	(u1 - cx1)/fx1,
 	(v1 - cy1)/fy1,
-	1 
+	-1 // fix for needed images swapped
   );
   cv::Mat ang2 = (cv::Mat_<float>(3,1) << 
 	(u2 - cx2)/fx2,
 	(v2 - cy2)/fy2,
-	1 
+	-1 
   );  
-//  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
+  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
 
   // Rotate into World CS
   ang1 = R1p * ang1;
   ang2 = R2p * ang2;
 
-//  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
+  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
 
-  cv::Mat world1 = cv::Mat::zeros(3,1,CV_32F);
-  cv::Mat world2 = cv::Mat::zeros(3,1,CV_32F);
-  float z1, z2;
 
   // Note this is now a constrained optimization problem...  
   // ... minimize the difference between world1 and world2.
   // Overdetermined -- 3 eqns, 2 unknowns.  First reduce to 2 eqns, 1 unk.
   //  then LSQ.
+  float X1, Y1, Z1;
 
+  float z1 = 0.0; //t1p.at<float>(2);
   float error = -1;
-  for(z1 = 0.0; z1 > -10000.0; z1 -= 1.0) {
-    world1 = (z1 * ang1) + t1p;
 
-    // Solve for z2 to match Z1 and Z2 given z1    
-    // world1 - t2 = z2 * ang2  |Z
-    z2 = (world1.at<float>(2) - t2p.at<float>(2)) / ang2.at<float>(2);
+  for(int i = 0; i < 100; i++) {
+    float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 )/2.0;
 
-    world2 = (z2 * ang2) + t2p;
+    // Calculate derror/dz1
+    float error_p = (calculateXYZ2( ang1, t1p, ang2, t2p, z1+1.0, &X1, &Y1, &Z1 ) 
+                  - calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 ));
 
-//    std::cout << "z1: " << z1 << std::endl;
-//    std::cout << "world1: " << world1 << std::endl << "world2: " << world2 << std::endl << std::endl;
+    // Calculate d^2error/dz1^2  (expect to be constant)
+    //float error_pp = (
+    //              (calculateXYZ2( ang1, t1p, ang2, t2p, z1+101.0, &X1, &Y1, &Z1 ) 
+    //              - calculateXYZ2( ang1, t1p, ang2, t2p, z1+100.0, &X1, &Y1, &Z1 ))
+    //            -
+    //              (calculateXYZ2( ang1, t1p, ang2, t2p, z1+100.0, &X1, &Y1, &Z1 ) 
+    //              - calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 ))
+    //)/100.0;
 
-    float X1 = world1.at<float>(0);
-    float Y1 = world1.at<float>(1);
-    float X2 = world2.at<float>(0);
-    float Y2 = world2.at<float>(1);
-    float new_error = (X1-X2)*(X1-X2) + (Y1-Y2)*(Y1-Y2);
-//    std::cout << "err: " << new_error << std::endl;    
+    std::cout << i << "\te:" << error << "\tep:" << error_p  <<  std::endl;  
 
-    // Best so far...
-    if(error < 0 || new_error < error) {
-        *X = X1;
-        *Y = Y1;
-        *Z = world1.at<float>(2);
-	error = new_error;
-    }
+    z1 = z1 - error / error_p;
+    error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
+
+    std::cout << i << "\tz1:" << z1 << "\tX:" << X1 << "\tY:" << Y1 << "\tZ:" << Z1 << "\terr:" << error << std::endl << std::endl;
   }
   return;
 }
@@ -431,14 +459,6 @@ cv::Mat M1, R1, t1;
 cv::Mat M2, R2, t2;
 void testXYZ3(int u1, int v1, int u2, int v2)
 {
-  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
-  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
-
-  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
-  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
-
   float X,Y,Z;
 
   calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
@@ -596,7 +616,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	  printf("(%d, %d) -> (%d, %d)\n", overlap.minx + overlap.width/2, overlap.miny + overlap.height/2,
 		  overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
-          testXYZ2(overlap.minx + overlap.width/2, overlap.miny + overlap.height/2, 
+          testXYZ3(overlap.minx + overlap.width/2, overlap.miny + overlap.height/2, 
                    overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
           /* Save to disparity Map */
@@ -690,13 +710,24 @@ int main(int argc, char** argv)
 	cv::FileStorage fs1( (std::string(srcFileName1) + ".yaml").c_str(), cv::FileStorage::READ );
 	fs1["A"] >> M1;
 	fs1["R"] >> R1;
-	fs1["t"] >> t1;
+	fs1["T"] >> t1;
 	fs1.release();
 	cv::FileStorage fs2( (std::string(srcFileName2) + ".yaml").c_str(), cv::FileStorage::READ );
 	fs2["A"] >> M2;
 	fs2["R"] >> R2;
-	fs2["t"] >> t2;
+	fs2["T"] >> t2;
 	fs2.release();
+
+	M1.assignTo(M1, CV_32F);
+	R1.assignTo(R1, CV_32F);
+	t1.assignTo(t1, CV_32F);
+	M2.assignTo(M2, CV_32F);
+	R2.assignTo(R2, CV_32F);
+	t2.assignTo(t2, CV_32F);
+
+
+	testXYZ3(0,32,3035,0);
+	return(0);
 
 	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2);
 

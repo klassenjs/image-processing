@@ -427,6 +427,26 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   return;
 }
 
+cv::Mat M1, R1, t1;
+cv::Mat M2, R2, t2;
+void testXYZ3(int u1, int v1, int u2, int v2)
+{
+  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
+  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
+
+  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
+  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
+  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+
+  float X,Y,Z;
+
+  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+
+  printf("FOUND: %f %f %f\n", X, Y, Z);
+}
+
+
 void testXYZ2(int u1, int v1, int u2, int v2)
 {
   cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
@@ -468,40 +488,6 @@ void testXYZ()
   printf("FOUND: %f %f %f\n", X, Y, Z);
 }
 
-void newBBox(int quadrant, const struct Rect* in, struct Rect* out)
-{
-	out->width = in->width / 2;
-	out->height = in->height / 2;
-
-	/* Avoid Gaps */
-	if(2 * out->width < in->width)
-		out->width++;
-	if(2 * out->height < in->height)
-		out->height++;
-
-	switch(quadrant) {
-		case 1:
-			out->minx = in->minx + (in->width)/2;
-			out->miny = in->miny + (in->height)/2;
-			break;
-		case 2:
-			out->minx = in->minx;
-			out->miny = in->miny + (in->height)/2;
-			break;
-		case 3:
-			out->minx = in->minx;
-			out->miny = in->miny;
-			break;
-		case 4:
-			out->minx = in->minx + (in->width)/2;
-			out->miny = in->miny;
-			break;
-		default:
-			out->minx = in->minx;
-			out->miny = in->miny;
-	}
-
-}
 
 // Learning search algorithm
 int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2)
@@ -574,12 +560,14 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	info("overlap2: %d %d %d %d\n", overlap2.minx, overlap2.miny, overlap2.minx+overlap2.width, overlap2.miny+overlap2.height);
 	info("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
 
+	/* Display Progress */
 	if(overlap.width > 512)
 	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
 
+	/* Termination condition */
 	if(overlap.width > 32 && overlap.height > 32 && max > 0.75) {
 
-		// Grid and compute again
+		/* Operators -- Grid and compute again */
 		int dim = MY_MIN(overlap.width, overlap.height);
 		{ /* Force to be a power of two makes the following loop more efficient */
 			unsigned char r = 0;
@@ -601,17 +589,8 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
 			}
 		}				
-/*
-	  	// Quarter and try compute again.
-		for(int i = 1; i <= 4; i++) {
-			newBBox(i, &overlap, &r1);	
-			newBBox(i, &overlap2, &r2);
-
-       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
-		}
-*/
 	} else {
-	  // Final Answer
+	  /* Final Answer -- Compute XYZ */
 	  int dx = overlap.minx + overlap.width/2 - overlap2.minx + overlap2.width/2;
 	  int dy = overlap.miny + overlap.height/2 - overlap2.miny + overlap2.height/2;
 	  printf("(%d, %d) -> (%d, %d)\n", overlap.minx + overlap.width/2, overlap.miny + overlap.height/2,
@@ -620,6 +599,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
           testXYZ2(overlap.minx + overlap.width/2, overlap.miny + overlap.height/2, 
                    overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
 
+          /* Save to disparity Map */
 	  float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
 	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
 					     &disparity, 1, 1, GDT_CFloat32, 0, 0);
@@ -706,6 +686,17 @@ int main(int argc, char** argv)
 	bbox2.height = srcDS2->GetRasterYSize();
 
 	dstDS = CreateOutputDataset(dstFileName, bbox1.width, bbox1.height, 1);
+
+	cv::FileStorage fs1( (std::string(srcFileName1) + ".yaml").c_str(), cv::FileStorage::READ );
+	fs1["A"] >> M1;
+	fs1["R"] >> R1;
+	fs1["t"] >> t1;
+	fs1.release();
+	cv::FileStorage fs2( (std::string(srcFileName2) + ".yaml").c_str(), cv::FileStorage::READ );
+	fs2["A"] >> M2;
+	fs2["R"] >> R2;
+	fs2["t"] >> t2;
+	fs2.release();
 
 	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2);
 

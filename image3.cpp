@@ -393,31 +393,31 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   // Calculate the "angles" of the line extending from the focal center to the point on the ground
   float fx1 = M1.at<float>(0,0);  // Focal length
   float fy1 = M1.at<float>(1,1);
-  float cx1 = M1.at<float>(2,0);  // Principle point
-  float cy1 = M1.at<float>(2,1);
+  float cx1 = M1.at<float>(0,2);  // Principle point
+  float cy1 = M1.at<float>(1,2);
 
   float fx2 = M2.at<float>(0,0);
   float fy2 = M2.at<float>(1,1);
-  float cx2 = M2.at<float>(2,0);
-  float cy2 = M2.at<float>(2,1);
+  float cx2 = M2.at<float>(0,2);
+  float cy2 = M2.at<float>(1,2);
 
   cv::Mat ang1 = (cv::Mat_<float>(3,1) << 
 	(u1 - cx1)/fx1,
-	(v1 - cy1)/fy1,
+	-(v1 - cy1)/fy1,
 	-1 // fix for needed images swapped
   );
   cv::Mat ang2 = (cv::Mat_<float>(3,1) << 
 	(u2 - cx2)/fx2,
-	(v2 - cy2)/fy2,
+	-(v2 - cy2)/fy2,
 	-1 
   );  
-  //std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
+  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
 
   // Rotate into World CS
   ang1 = R1p * ang1;
   ang2 = R2p * ang2;
 
-  //std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
+  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
 
 
   // Note this is now a constrained optimization problem...  
@@ -429,14 +429,14 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   float z1 = 0.0; 
   float min_error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, X, Y, Z );
 
-  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 1.0) {
+  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 4.0) {
     float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
     //std::cout << z1 << "\t" << error << std::endl;
     if(error < min_error) {
-	min_error = error;
-	*X = X1;  
+        min_error = error;
+  	*X = X1;  
   	*Y = Y1;
-	*Z = Z1;
+  	*Z = Z1;
     }
   }
   return;
@@ -463,6 +463,8 @@ void testXYZ2(int u1, int v1, int u2, int v2)
   cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
   cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
   cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+
+  //R1 = (cv::Mat_<float>(3,3) << 1, 0, 0,  0, 1, 0,  0, 0, 1);
 
   float X,Y,Z;
 
@@ -712,7 +714,8 @@ int main(int argc, char** argv)
 	R2.assignTo(R2, CV_32F);
 	t2.assignTo(t2, CV_32F);
 
-
+	//testXYZ3(0,0,3035,0);
+	//testXYZ3(7680,13824,0,0);
 	//testXYZ3(0,32,3035,0);
 	//return(0);
 

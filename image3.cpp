@@ -411,13 +411,13 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
 	(v2 - cy2)/fy2,
 	-1 
   );  
-  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
+  //std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
 
   // Rotate into World CS
   ang1 = R1p * ang1;
   ang2 = R2p * ang2;
 
-  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
+  //std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
 
 
   // Note this is now a constrained optimization problem...  
@@ -426,31 +426,18 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   //  then LSQ.
   float X1, Y1, Z1;
 
-  float z1 = 0.0; //t1p.at<float>(2);
-  float error = -1;
+  float z1 = 0.0; 
+  float min_error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, X, Y, Z );
 
-  for(int i = 0; i < 100; i++) {
-    float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 )/2.0;
-
-    // Calculate derror/dz1
-    float error_p = (calculateXYZ2( ang1, t1p, ang2, t2p, z1+1.0, &X1, &Y1, &Z1 ) 
-                  - calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 ));
-
-    // Calculate d^2error/dz1^2  (expect to be constant)
-    //float error_pp = (
-    //              (calculateXYZ2( ang1, t1p, ang2, t2p, z1+101.0, &X1, &Y1, &Z1 ) 
-    //              - calculateXYZ2( ang1, t1p, ang2, t2p, z1+100.0, &X1, &Y1, &Z1 ))
-    //            -
-    //              (calculateXYZ2( ang1, t1p, ang2, t2p, z1+100.0, &X1, &Y1, &Z1 ) 
-    //              - calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 ))
-    //)/100.0;
-
-    std::cout << i << "\te:" << error << "\tep:" << error_p  <<  std::endl;  
-
-    z1 = z1 - error / error_p;
-    error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
-
-    std::cout << i << "\tz1:" << z1 << "\tX:" << X1 << "\tY:" << Y1 << "\tZ:" << Z1 << "\terr:" << error << std::endl << std::endl;
+  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 1.0) {
+    float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
+    //std::cout << z1 << "\t" << error << std::endl;
+    if(error < min_error) {
+	min_error = error;
+	*X = X1;  
+  	*Y = Y1;
+	*Z = Z1;
+    }
   }
   return;
 }
@@ -726,8 +713,8 @@ int main(int argc, char** argv)
 	t2.assignTo(t2, CV_32F);
 
 
-	testXYZ3(0,32,3035,0);
-	return(0);
+	//testXYZ3(0,32,3035,0);
+	//return(0);
 
 	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2);
 

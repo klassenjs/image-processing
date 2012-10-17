@@ -18,4 +18,13 @@ complex2rgb: complex2rgb.cpp
 image-find-cpp: image-find-cpp.cpp
 
 image3: image3.cpp
-	g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr/include/gdal -L/home/jimk/PPP/local/lib -lopencv_core -lopencv_calib3d -lopencv_imgproc -lopencv_highgui -lopencv_contrib -I/home/jimk/PPP/local/include -Wl,-R -Wl,'/home/jimk/PPP/local/lib' -g
+	g++ \
+		-I/usr/include/gdal \
+		-I/home/jimk/apps/OpenCV/2.4.2/include \
+		-L/home/jimk/apps/OpenCV/2.4.2/lib \
+		-Wl,-R -Wl,'/home/jimk/apps/OpenCV/2.4.2/lib' \
+		-lgdal1.6.0 -lproj \
+		-lfftw3f -lfftw3f_threads -lm \
+		-lopencv_core -lopencv_calib3d -lopencv_imgproc \
+		-lopencv_highgui -lopencv_contrib \
+		image3.cpp -o image3 -g

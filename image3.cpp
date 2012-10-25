@@ -41,6 +41,7 @@ g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr
 #include <math.h>
 #include <fftw3.h>
 
+#include <getopt.h>
 
 #ifndef CORES
  #define CORES (int)sysconf(_SC_NPROCESSORS_ONLN)
@@ -76,249 +77,7 @@ void info(const char* fmt, ... ) {
 }
 
 
-
-
-
-#define MY_X(ii, jj) x[((ii)*width) + (jj)]
-void fft2shift(float *x, int width, int height )
-{
-	int m2, n2;
-	int i, k;
-	float tmp1, tmp2;
-
-	m2 = height / 2;    // half of row dimension
-	n2 = width / 2;    // half of column dimension
-
-	for (i = 0; i < height; i++)  // row
-	{
-		for(k = 0; k < n2; k++) // col
-		{
-			tmp1 = MY_X(i, k + n2);
-			MY_X(i, k + n2) = MY_X(i, k);
-			MY_X(i, k) = tmp1;
-		}
-	}
-	for (i = 0; i < m2; i++)  /* row */
-	{
-		for(k = 0; k < width; k++) /* col */
-		{
-			tmp2 = MY_X(i + m2, k);
-			MY_X(i + m2, k) = MY_X(i, k);
-			MY_X(i, k) = tmp2;
-		}
-	}
-
-}
-#undef MY_X
-
-inline void runFFT(fftwf_plan plan, GDALDataset *srcDS, complex float *img, int band, struct Rect bbox, int width, int height)
-{
-	const size_t px_count = width * height;
-
-	for(int i = 0 ; i < px_count; i++)
-	  img[i] = 0.0;
-
-	srcDS->GetRasterBand(band)->RasterIO( GF_Read, bbox.minx, bbox.miny, 
-				   bbox.width, bbox.height,
-				   img, bbox.width, bbox.height,
-				   GDT_CFloat32, 0, sizeof(complex float) * width);
-	fftwf_execute(plan);
-
-	complex float norm = csqrt(px_count + 0I);
-	for(int i = 0; i < px_count; i++) {
-		img[i] = img[i] / norm;
-	}
-}
-
-float findOffset(GDALDataset *srcDS1, GDALDataset *srcDS2, struct Rect bbox1, struct Rect bbox2, int width, int height, int* offset_x, int* offset_y) 
-{
-	fftwf_plan plan1, plan2, planI;
-	fftwf_complex *img1, *img2;
-	float *out;
-	int band;
-	int n_bands = MY_MIN(srcDS1->GetRasterCount(), srcDS2->GetRasterCount());
-	n_bands = 1;
-	const size_t px_count = width * height;
-	const size_t buffer_len = sizeof(fftwf_complex) * px_count;
-
-	img1  = (fftwf_complex*) fftwf_malloc(buffer_len);
-	img2  = (fftwf_complex*) fftwf_malloc(buffer_len);
-	out   = (float*) fftwf_malloc(sizeof(float) * px_count);
-		/* ^ not used in fft, but aligned is good anyway */
-	if(img1 == NULL || img2 == NULL || out == NULL)
-		error("Could not allocate memory\n");
-
-
-	plan1 = fftwf_plan_dft_2d(height, width, 
-	                        img1, img1, FFTW_FORWARD, FFTW_ESTIMATE);
-
-	plan2 = fftwf_plan_dft_2d(height, width, 
-	                        img2, img2, FFTW_FORWARD, FFTW_ESTIMATE);
-
-	planI = fftwf_plan_dft_2d(height, width, 
-	                        img2, img2, FFTW_BACKWARD, FFTW_ESTIMATE);
-
-	if(plan1 == NULL || plan2 == NULL || planI == NULL)
-		error("Could not plan FFT\n");
-
-	/* Initialize out array */
-	for(int i = 0; i < px_count; i++) {
-		out[i] = 1.0;
-	}
-
-	/* Calculate correlation for each band between the two images, multiply results of all bands */
-	for(band = 1; band <= n_bands; band++) {
-		info("FFT 1 band %d\n", band);
-		runFFT( plan1, srcDS1, img1, band, bbox1, width, height );
-		info("FFT 2 band %d\n", band);
-		runFFT( plan2, srcDS2, img2, band, bbox2, width, height );
-
-		
-		info("Complex Conj band %d\n", band);
-		/* mult img1 and conj of img2 */
-		for(int px = 0; px < px_count; px++) {
-			img2[px] = img1[px] * conj(img2[px]);
-		}
-	
-		/* IFFT of result */	
-		info("IFFT band %d\n", band);
-		fftwf_execute(planI);	
-
-		info("normalize band %d\n", band);
-		complex float norm = csqrt(px_count + 0I);
-		float max = cabs(img2[0] / norm);
-		float min = cabs(img2[0] / norm);
-		for(int i = 0; i < px_count; i++) {
-			img2[i] = img2[i] / norm;
-			
-			if(cabs(img2[i]) < min)
-				min = cabs(img2[i]);
-			if(cabs(img2[i]) > max)
-				max = cabs(img2[i]);
-		}
-		/* img2 should now be real - normalize 0.0-1.0 and -- write output */
-		//info("Save band %d; min = %f max = %f\n", band, min, max);
-		for(int i = 0; i < px_count; i++) {
-			out[i] = out[i] * ((cabs(img2[i]) - min) / (max-min) );
-		}
-
-	}
-	
-	/* Cleanup memory */
-	fftwf_destroy_plan(plan1);
-	fftwf_destroy_plan(plan2);
-	fftwf_destroy_plan(planI);
-	fftwf_free(img1);
-	fftwf_free(img2);
-
-	fft2shift(out, width, height);
-
-	/* Row and column of image center */
-	const int pp_row = height / 2;
-	const int pp_col = width / 2;
-
-	const int height2 = pp_row * 2; /* Avoid odd pixels at end */
-	const int width2 = pp_col * 2; /* image-cross-cor fft2shift has a bug with this */
-
-	/* Find peak response that is outside the mask */
-	float max = -1;
-	int max_col = 0, max_row = 0;
-
-	for(int row = 0; row < height2; row++) {
-		int row_offset = row * width;
-
-		for(int col = 0; col < width2; col++) {
-			float v = out[row_offset + col];
-			if(v > max) {
-				max = v;
-				max_col = col;
-				max_row = row;
-			}
-		}
-	}
-
-	*offset_x = max_col - pp_col;
-	*offset_y = max_row - pp_row;
-
-	fftwf_free(out);
-
-	return max;
-}
-
-
-
-
-void displayMatch(GDALDataset* srcDS1, GDALDataset* srcDS2, struct Rect bbox1, struct Rect bbox2, int offset_x, int offset_y)
-{
-  /* Calculate size of output image */
-  
-  int minx = MY_MIN(bbox1.minx, bbox2.minx + offset_x);
-  int miny = MY_MIN(bbox1.miny, bbox2.miny + offset_y);
-  int maxx = MY_MAX(bbox1.minx+bbox1.width, bbox2.minx+bbox2.width+offset_x);
-  int maxy = MY_MAX(bbox1.miny+bbox1.height, bbox2.miny+bbox2.height+offset_y);
-
-  int width = maxx-minx;
-  int height = maxy-miny;
-
-  std::vector<cv::Mat> im;
-  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
-  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
-  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
-
-  unsigned char* img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
-  unsigned char* img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
-  srcDS1->GetRasterBand(3)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
-				   bbox1.width, bbox1.height,
-				   img1, bbox1.width, bbox1.height,
-				   GDT_Byte, 0, 0);
-  srcDS1->GetRasterBand(2)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
-				   bbox1.width, bbox1.height,
-				   img2, bbox1.width, bbox1.height,
-				   GDT_Byte, 0, 0);
-
-  int dx = bbox1.minx - minx;
-  int dy = bbox1.miny - miny;
-  for(int y = 0; y < bbox1.height; y++) {
-    for(int x = 0; x < bbox1.width; x++) {
-      int px = x + y*bbox1.width;
-      unsigned char px_val = img1[px];
-      im[0].at<unsigned char>(y+dy, x+dx) = px_val;
-      px_val = img2[px];
-      im[1].at<unsigned char>(y+dy, x+dx) = px_val;
-    }
-  }
-  free(img1);
-  free(img2);
-
-  img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
-  srcDS2->GetRasterBand(1)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
-				   bbox2.width, bbox2.height,
-				   img2, bbox2.width, bbox2.height,
-				   GDT_Byte, 0, 0);
-
-  dx = bbox2.minx+offset_x - minx;
-  dy = bbox2.miny+offset_y - miny;
-  for(int y = 0; y < bbox2.height; y++) {
-    for(int x = 0; x < bbox2.width; x++) {
-      int px = x + y*bbox2.width;
-      unsigned char px_val = img2[px];
-      im[2].at<unsigned char>(y+dy, x+dx) = px_val;
-    }
-  }
-  free(img2);
-
-  cv::Mat img = cv::Mat(height, width, CV_8UC3);
-  cv::merge(im, img);
-  cv::namedWindow("match", CV_WINDOW_NORMAL|CV_WINDOW_KEEPRATIO|CV_GUI_EXPANDED);
-  cv::imshow("match", img);
-
-  char saveName[1024];
-  snprintf(saveName, 1024, "snapshot_%d-%d_%d.jpg", bbox1.width, bbox1.minx, bbox1.miny);
-  cv::imwrite(saveName, img);
-
-  cv::waitKey(gWAITKEY);
-}
-
+/***********************  calculateXYZ  ***********************/
 float calculateXYZ2(
 	cv::Mat ang1, cv::Mat t1p, cv::Mat ang2, cv::Mat t2p,
 	float z1,
@@ -442,64 +201,276 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   return;
 }
 
+/* Globals - XYZ Calc */
+bool skipXYZ = true;
+
 cv::Mat M1, R1, t1;
 cv::Mat M2, R2, t2;
-void testXYZ3(int u1, int v1, int u2, int v2)
+
+void calculateXYZ(int u1, int v1, int u2, int v2,
+		float *X, float* Y, float* Z)
 {
-  float X,Y,Z;
+  *X = 0.0; *Y = 0.0; *Z = 0.0;
+  if(!skipXYZ) {
+  	calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, X, Y, Z);
 
-  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
-
-  printf("FOUND: %f %f %f\n", X, Y, Z);
+  }
 }
 
 
-void testXYZ2(int u1, int v1, int u2, int v2)
+/***********************  calculate disparity  ***********************/
+
+/*---------------------- FFT/Correlation Library ----------------------*/
+#define MY_X(ii, jj) x[((ii)*width) + (jj)]
+void fft2shift(float *x, int width, int height )
 {
-  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
-  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
+	int m2, n2;
+	int i, k;
+	float tmp1, tmp2;
 
-  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
-  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+	m2 = height / 2;    // half of row dimension
+	n2 = width / 2;    // half of column dimension
 
-  //R1 = (cv::Mat_<float>(3,3) << 1, 0, 0,  0, 1, 0,  0, 0, 1);
+	for (i = 0; i < height; i++)  // row
+	{
+		for(k = 0; k < n2; k++) // col
+		{
+			tmp1 = MY_X(i, k + n2);
+			MY_X(i, k + n2) = MY_X(i, k);
+			MY_X(i, k) = tmp1;
+		}
+	}
+	for (i = 0; i < m2; i++)  /* row */
+	{
+		for(k = 0; k < width; k++) /* col */
+		{
+			tmp2 = MY_X(i + m2, k);
+			MY_X(i + m2, k) = MY_X(i, k);
+			MY_X(i, k) = tmp2;
+		}
+	}
 
-  float X,Y,Z;
+}
+#undef MY_X
 
-  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
+inline void runFFT(fftwf_plan plan, GDALDataset *srcDS, complex float *img, int band, struct Rect bbox, int width, int height)
+{
+	const size_t px_count = width * height;
 
-  printf("FOUND: %f %f %f\n", X, Y, Z);
+	for(int i = 0 ; i < px_count; i++)
+	  img[i] = 0.0;
+
+	srcDS->GetRasterBand(band)->RasterIO( GF_Read, bbox.minx, bbox.miny, 
+				   bbox.width, bbox.height,
+				   img, bbox.width, bbox.height,
+				   GDT_CFloat32, 0, sizeof(complex float) * width);
+	fftwf_execute(plan);
+
+	complex float norm = csqrt(px_count + 0I);
+	for(int i = 0; i < px_count; i++) {
+		img[i] = img[i] / norm;
+	}
+}
+
+/*--------------------------- Find offset of best match ---------------------*/
+
+/* Globals - DisparityMap */
+GDALDataset *srcDS1, *srcDS2, *dstDS;
+FILE *xyzFile;
+int   minSize = 32;
+char* anaglyphBasename;
+int   anaglyphMinSize = 512;
+
+float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, int* offset_x, int* offset_y) 
+{
+	fftwf_plan plan1, plan2, planI;
+	fftwf_complex *img1, *img2;
+	float *out;
+	int band;
+	int n_bands = MY_MIN(srcDS1->GetRasterCount(), srcDS2->GetRasterCount());
+	n_bands = 1;
+	const size_t px_count = width * height;
+	const size_t buffer_len = sizeof(fftwf_complex) * px_count;
+
+	img1  = (fftwf_complex*) fftwf_malloc(buffer_len);
+	img2  = (fftwf_complex*) fftwf_malloc(buffer_len);
+	out   = (float*) fftwf_malloc(sizeof(float) * px_count);
+		/* ^ not used in fft, but aligned is good anyway */
+	if(img1 == NULL || img2 == NULL || out == NULL)
+		error("Could not allocate memory\n");
+
+
+	plan1 = fftwf_plan_dft_2d(height, width, 
+	                        img1, img1, FFTW_FORWARD, FFTW_ESTIMATE);
+
+	plan2 = fftwf_plan_dft_2d(height, width, 
+	                        img2, img2, FFTW_FORWARD, FFTW_ESTIMATE);
+
+	planI = fftwf_plan_dft_2d(height, width, 
+	                        img2, img2, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+	if(plan1 == NULL || plan2 == NULL || planI == NULL)
+		error("Could not plan FFT\n");
+
+	/* Initialize out array */
+	for(int i = 0; i < px_count; i++) {
+		out[i] = 1.0;
+	}
+
+	/* Calculate correlation for each band between the two images, multiply results of all bands */
+	for(band = 1; band <= n_bands; band++) {
+		info("FFT 1 band %d\n", band);
+		runFFT( plan1, srcDS1, img1, band, bbox1, width, height );
+		info("FFT 2 band %d\n", band);
+		runFFT( plan2, srcDS2, img2, band, bbox2, width, height );
+
+		
+		info("Complex Conj band %d\n", band);
+		/* mult img1 and conj of img2 */
+		for(int px = 0; px < px_count; px++) {
+			img2[px] = img1[px] * conj(img2[px]);
+		}
+	
+		/* IFFT of result */	
+		info("IFFT band %d\n", band);
+		fftwf_execute(planI);	
+
+		info("normalize band %d\n", band);
+		complex float norm = csqrt(px_count + 0I);
+		float max = cabs(img2[0] / norm);
+		float min = cabs(img2[0] / norm);
+		for(int i = 0; i < px_count; i++) {
+			img2[i] = img2[i] / norm;
+			
+			if(cabs(img2[i]) < min)
+				min = cabs(img2[i]);
+			if(cabs(img2[i]) > max)
+				max = cabs(img2[i]);
+		}
+		/* img2 should now be real - normalize 0.0-1.0 and -- write output */
+		//info("Save band %d; min = %f max = %f\n", band, min, max);
+		for(int i = 0; i < px_count; i++) {
+			out[i] = out[i] * ((cabs(img2[i]) - min) / (max-min) );
+		}
+
+	}
+	
+	/* Cleanup memory */
+	fftwf_destroy_plan(plan1);
+	fftwf_destroy_plan(plan2);
+	fftwf_destroy_plan(planI);
+	fftwf_free(img1);
+	fftwf_free(img2);
+
+	fft2shift(out, width, height);
+
+	/* Row and column of image center */
+	const int pp_row = height / 2;
+	const int pp_col = width / 2;
+
+	const int height2 = pp_row * 2; /* Avoid odd pixels at end */
+	const int width2 = pp_col * 2; /* image-cross-cor fft2shift has a bug with this */
+
+	/* Find peak response that is outside the mask */
+	float max = -1;
+	int max_col = 0, max_row = 0;
+
+	for(int row = 0; row < height2; row++) {
+		int row_offset = row * width;
+
+		for(int col = 0; col < width2; col++) {
+			float v = out[row_offset + col];
+			if(v > max) {
+				max = v;
+				max_col = col;
+				max_row = row;
+			}
+		}
+	}
+
+	*offset_x = max_col - pp_col;
+	*offset_y = max_row - pp_row;
+
+	fftwf_free(out);
+
+	return max;
 }
 
 
-void testXYZ()
+void displayMatch(struct Rect bbox1, struct Rect bbox2, int offset_x, int offset_y)
 {
-  cv::Mat M1 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R1 = (cv::Mat_<float>(3,3) << -0.73056234718734, -0.6828392198637, 0.003042480576291, 0.68282529346054, -0.73049824782602, 0.011042125413153, -0.0053174695727292, 0.010144443752124, 0.99993440523782);
-  cv::Mat t1 = (cv::Mat_<float>(3,1) << 3946076.5220691, 3398275.7654668, -52833.142739149);
+  /* Calculate size of output image */
+  
+  int minx = MY_MIN(bbox1.minx, bbox2.minx + offset_x);
+  int miny = MY_MIN(bbox1.miny, bbox2.miny + offset_y);
+  int maxx = MY_MAX(bbox1.minx+bbox1.width, bbox2.minx+bbox2.width+offset_x);
+  int maxy = MY_MAX(bbox1.miny+bbox1.height, bbox2.miny+bbox2.height+offset_y);
 
-  cv::Mat M2 = (cv::Mat_<float>(3,3) << 10000.0, 0.0, 3839.5, 0.0, 10000.0, 6911.5, 0.0, 0.0, 1.0);
-  cv::Mat R2 = (cv::Mat_<float>(3,3) << -0.73024011297182, -0.68315173576369, 0.0072858307670647, 0.68318691406176, -0.7301596949777, 0.011066177516865, -0.0022400584083765, 0.013058550958209, 0.99991222434032);
-  cv::Mat t2 = (cv::Mat_<float>(3,1) << 3948436.9257857, 3396314.5768609, -69657.736900173);
+  int width = maxx-minx;
+  int height = maxy-miny;
 
-  float X,Y,Z;
-  int u1,v1,u2,v2;
-  u1 = 0;
-  v1 = 0;
-  u2 = -3000;
-  v2 = 0;
+  std::vector<cv::Mat> im;
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
+  im.push_back( cv::Mat::zeros(height, width, CV_8U) );
 
-  std::cout << "R1 was: " << R1 << std::endl;
-  calculateXYZ(M1, R1, t1, M2, R2, t2, u1, v1, u2, v2, &X, &Y, &Z);
-  std::cout << "R1 is: " << R1 << std::endl;
-  printf("FOUND: %f %f %f\n", X, Y, Z);
+  unsigned char* img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  unsigned char* img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  srcDS1->GetRasterBand(3)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img1, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+  srcDS1->GetRasterBand(2)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img2, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+
+  int dx = bbox1.minx - minx;
+  int dy = bbox1.miny - miny;
+  for(int y = 0; y < bbox1.height; y++) {
+    for(int x = 0; x < bbox1.width; x++) {
+      int px = x + y*bbox1.width;
+      unsigned char px_val = img1[px];
+      im[0].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img2[px];
+      im[1].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img1);
+  free(img2);
+
+  img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  srcDS2->GetRasterBand(1)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
+				   bbox2.width, bbox2.height,
+				   img2, bbox2.width, bbox2.height,
+				   GDT_Byte, 0, 0);
+
+  dx = bbox2.minx+offset_x - minx;
+  dy = bbox2.miny+offset_y - miny;
+  for(int y = 0; y < bbox2.height; y++) {
+    for(int x = 0; x < bbox2.width; x++) {
+      int px = x + y*bbox2.width;
+      unsigned char px_val = img2[px];
+      im[2].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img2);
+
+  cv::Mat img = cv::Mat(height, width, CV_8UC3);
+  cv::merge(im, img);
+  cv::namedWindow("match", CV_WINDOW_NORMAL|CV_WINDOW_KEEPRATIO|CV_GUI_EXPANDED);
+  cv::imshow("match", img);
+
+  char saveName[1024];
+  snprintf(saveName, 1024, "%s_%d-%d_%d.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
+  cv::imwrite(saveName, img);
+
+  cv::waitKey(gWAITKEY);
 }
 
 
 // Learning search algorithm
-int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstDS, const struct Rect bbox1, const struct Rect bbox2)
+int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 {
 	struct Rect r1, r2;
 
@@ -515,7 +486,7 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 
 	info("Processing: (%d,%d) w: %d h: %d\n", bbox1.minx, bbox1.miny, bbox1.width, bbox1.height);
 
-	float max = findOffset(srcDS1, srcDS2, bbox1, bbox2, width, height, &offset_x, &offset_y);
+	float max = findOffset(bbox1, bbox2, width, height, &offset_x, &offset_y);
 
 
 	/* Find overlap between images */
@@ -570,11 +541,11 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 	info("\t      offset: %d\t%d\t%f\n\ttotal offset: %d\t%d\n", offset_x, offset_y, max, total_offset_x, total_offset_y);
 
 	/* Display Progress */
-	if(overlap.width > 512)
-	  displayMatch(srcDS1, srcDS2, bbox1, bbox2, total_offset_x, total_offset_y);
+	if(overlap.width > anaglyphMinSize)
+	  displayMatch(bbox1, bbox2, total_offset_x, total_offset_y);
 
 	/* Termination condition */
-	if(overlap.width > 32 && overlap.height > 32 && max > 0.75) {
+	if(overlap.width > minSize && overlap.height > minSize && max > 0.75) {
 
 		/* Operators -- Grid and compute again */
 		int dim = MY_MIN(overlap.width, overlap.height);
@@ -595,24 +566,50 @@ int calcDisparityMap(GDALDataset* srcDS1, GDALDataset* srcDS2, GDALDataset* dstD
 				r1.miny = overlap.miny + jj;
 				r2.minx = overlap2.minx + ii;
 				r2.miny = overlap2.miny + jj;
-	       			calcDisparityMap(srcDS1, srcDS2, dstDS, r1, r2);
+	       			calcDisparityMap(r1, r2);
 			}
 		}				
 	} else {
 	  /* Final Answer -- Compute XYZ */
-	  int dx = overlap.minx + overlap.width/2 - overlap2.minx + overlap2.width/2;
-	  int dy = overlap.miny + overlap.height/2 - overlap2.miny + overlap2.height/2;
-	  printf("(%d, %d) -> (%d, %d)\n", overlap.minx + overlap.width/2, overlap.miny + overlap.height/2,
-		  overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
+          int u1 = overlap.minx + overlap.width/2;
+          int v1 = overlap.miny + overlap.height/2;
+          int u2 = overlap2.minx + overlap2.width/2;
+          int v2 = overlap2.miny + overlap2.height/2;
+	  info("(%d, %d) - (%d, %d)\n", u1, v1, u2, v2);
 
-          testXYZ3(overlap.minx + overlap.width/2, overlap.miny + overlap.height/2, 
-                   overlap2.minx + overlap2.width/2, overlap2.miny + overlap2.height/2);
+          /* Calculate XYZ */
+	  if(!skipXYZ) {
+          	float X,Y,Z;
+          	calculateXYZ(u1, v1, u2, v2, &X, &Y, &Z);
+
+	  	/* Save bands to XYZ file to colorize output */
+          	int n_bands = srcDS1->GetRasterCount();
+	  	char* bands;
+          	int bands_len = 0;
+	  	bands = (char*)alloca(10*n_bands);
+	  	bzero(bands, 10*n_bands);
+          	for(int band=1; band <= n_bands; band++) {
+			float val;
+		        srcDS1->GetRasterBand(band)->RasterIO( GF_Read, overlap.minx, overlap.miny,
+        	                           overlap.width, overlap.height,
+        	                           &val, 1, 1,
+        	                           GDT_Float32, 0, sizeof(float));
+			int chars = snprintf(bands + bands_len, 10*n_bands - bands_len, "%f ", val);
+			if(chars > 0)
+				bands_len += chars;
+			else
+				break;
+		  }
+
+	  	  fprintf(xyzFile, "%f %f %f %s\n", X, Y, Z, bands);
+          }
 
           /* Save to disparity Map */
-	  float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
-	  dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
-					     &disparity, 1, 1, GDT_CFloat32, 0, 0);
-
+          if(dstDS) {
+	  	float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
+	  	dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
+						     &disparity, 1, 1, GDT_CFloat32, 0, 0);
+          }
 	}
 
 	return 0;
@@ -642,32 +639,87 @@ GDALDataset* CreateOutputDataset(char* fileName, int width, int height, int band
 	return dstDS;
 }
 
+
+void usage() {
+	printf("image3 [options] left_image right_image\n");
+	printf("\t--min-size=32              Minimum side length of pixel blocks to compare.\n");
+	printf("\t--dispersion=[output_file] TIFF file to store dispersion map.\n");
+	printf("\t--anaglyph=[basename]      Basename to store anaglyph snapshots. (e.g. basename_X_Y_size.png)\n");
+	printf("\t--anaglyph-size=512        Smallest size anaglyph to save.\n");
+	printf("\t--cores=[number]           Maximum number of threads to use during processing. (default #CPU cores)\n");
+	printf("\n");
+	printf("\t--xyz=[output_file]        ASCII XYZ file to store point cloud.\n");
+	printf("\t--help                     Print this message and exit.\n");
+}
+
 int main(int argc, char** argv)
 {
-	char* srcFileName1;
-	char* srcFileName2;
-	char* dstFileName;
+	char* srcFilename1 = NULL;
+	char* srcFilename2 = NULL;
+	char* dstFilename = NULL;
+	char* xyzFilename = NULL;
+	int cores = CORES;
 
-	//testXYZ();
-	//return(0);
-
-	info("Attempting to use %d cores for FFT\n", CORES);
-	if(fftwf_init_threads())
-		fftwf_plan_with_nthreads(CORES);
-
-	GDALDataset* srcDS1, *srcDS2, *dstDS;
+	static const char *optString = "m:d:x:a:s:c:h";
+	static const struct option longOpts[] = {
+		{ "min-size", required_argument, NULL, 'm' },
+		{ "dispersion", required_argument, NULL, 'd' },
+		{ "xyz", required_argument, NULL, 'x' },
+		{ "anaglyph", required_argument, NULL, 'a' },
+		{ "anaglyph-size", required_argument, NULL, 's' },
+		{ "cores", required_argument, NULL, 'c'},
+		{ "help", no_argument, NULL, 'h'},
+		{ NULL, no_argument, NULL, 0 }
+	};
+	int opt = 0;
 	
-	if(argc != 4)
-		error("Usage: prog infile1 infile2 outfile");
+	opt = getopt_long( argc, argv, optString, longOpts, NULL );
+	while( opt != -1 ) {
+		switch(opt) {
+			case 'm':
+				minSize = atoi( optarg );
+				break;
+			case 'd':
+				dstFilename = optarg;
+				break;
+			case 'x':
+				skipXYZ = false;
+				xyzFilename = optarg;
+				break;
+			case 'a':
+				anaglyphBasename = optarg;
+				break;
+			case 's':
+				anaglyphMinSize = atoi( optarg );
+				break;
+			case 'c':
+				cores = atoi( optarg );
+				break;
+			case 'h':
+				usage();
+				return(0);
+				break;
+			default:
+				break;
+		};
+		opt = getopt_long( argc, argv, optString, longOpts, NULL );
+	};
 
-	srcFileName1 = argv[1];
-	srcFileName2 = argv[2];
-	dstFileName = argv[3];
+	if(argc != optind + 2) {
+		usage();
+		return(1);
+	}
+	srcFilename1 = argv[optind++];
+	srcFilename2 = argv[optind++];
+
+	info("Attempting to use %d cores for FFT\n", cores);
+	if(fftwf_init_threads())
+		fftwf_plan_with_nthreads(cores);
 
 	GDALAllRegister();
 
-	srcDS1 = (GDALDataset*) GDALOpen( srcFileName1, GA_ReadOnly );
-	srcDS2 = (GDALDataset*) GDALOpen( srcFileName2, GA_ReadOnly );
+	srcDS1 = (GDALDataset*) GDALOpen( srcFilename1, GA_ReadOnly );
+	srcDS2 = (GDALDataset*) GDALOpen( srcFilename2, GA_ReadOnly );
 
 	if(srcDS1 == NULL || srcDS2 == NULL)
 		error("Could not open source dataset");
@@ -687,6 +739,7 @@ int main(int argc, char** argv)
 	   (srcDS1->GetRasterCount() != srcDS2->GetRasterCount()))
 		fprintf(stderr, "Warning: Source dataset geometries should match!\n");
 
+	/* Initial search box is entire image */
 	struct Rect bbox1, bbox2;
 	bbox1.minx = bbox1.miny = bbox2.minx = bbox2.miny = 0;
 	bbox1.width = srcDS1->GetRasterXSize();
@@ -694,36 +747,38 @@ int main(int argc, char** argv)
 	bbox2.width = srcDS2->GetRasterXSize();
 	bbox2.height = srcDS2->GetRasterYSize();
 
-	dstDS = CreateOutputDataset(dstFileName, bbox1.width, bbox1.height, 1);
+	if(dstFilename)
+		dstDS = CreateOutputDataset(dstFilename, bbox1.width, bbox1.height, 1);
 
-	cv::FileStorage fs1( (std::string(srcFileName1) + ".yaml").c_str(), cv::FileStorage::READ );
-	fs1["A"] >> M1;
-	fs1["R"] >> R1;
-	fs1["T"] >> t1;
-	fs1.release();
-	cv::FileStorage fs2( (std::string(srcFileName2) + ".yaml").c_str(), cv::FileStorage::READ );
-	fs2["A"] >> M2;
-	fs2["R"] >> R2;
-	fs2["T"] >> t2;
-	fs2.release();
+	if(!skipXYZ) {
+		xyzFile = fopen(xyzFilename, "w");
 
-	M1.assignTo(M1, CV_32F);
-	R1.assignTo(R1, CV_32F);
-	t1.assignTo(t1, CV_32F);
-	M2.assignTo(M2, CV_32F);
-	R2.assignTo(R2, CV_32F);
-	t2.assignTo(t2, CV_32F);
+		cv::FileStorage fs1( (std::string(srcFilename1) + ".yaml").c_str(), cv::FileStorage::READ );
+		fs1["A"] >> M1;
+		fs1["R"] >> R1;
+		fs1["T"] >> t1;
+		fs1.release();
+		cv::FileStorage fs2( (std::string(srcFilename2) + ".yaml").c_str(), cv::FileStorage::READ );
+		fs2["A"] >> M2;
+		fs2["R"] >> R2;
+		fs2["T"] >> t2;
+		fs2.release();
 
-	//testXYZ3(0,0,3035,0);
-	//testXYZ3(7680,13824,0,0);
-	//testXYZ3(0,32,3035,0);
-	//return(0);
-
-	calcDisparityMap(srcDS1, srcDS2, dstDS, bbox1, bbox2);
+		M1.assignTo(M1, CV_32F);
+		R1.assignTo(R1, CV_32F);
+		t1.assignTo(t1, CV_32F);
+		M2.assignTo(M2, CV_32F);
+		R2.assignTo(R2, CV_32F);
+		t2.assignTo(t2, CV_32F);
+	}
+	calcDisparityMap(bbox1, bbox2);
 
 	delete srcDS1;
 	delete srcDS2;
 	delete dstDS;
+
+	if(xyzFile)
+		fclose(xyzFile);
 
 	fftwf_cleanup_threads();
 

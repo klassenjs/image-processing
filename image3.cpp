@@ -123,6 +123,7 @@ float calculateXYZ2(
  * Notes:
  *    x, y, z - position in camera coordinate system
  */
+#define FAST_LINE
 void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1, 
 		  const cv::Mat M2, const cv::Mat R2, const cv::Mat t2, 
 		  int u1, int v1, int u2, int v2,
@@ -185,19 +186,59 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   //  then LSQ.
   float X1, Y1, Z1;
 
-  float z1 = 0.0; 
-  float min_error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, X, Y, Z );
+  float z0 = 0.0; 
+  float error0 = calculateXYZ2( ang1, t1p, ang2, t2p, z0, X, Y, Z );
+#ifdef FAST_LINE
+  float z1 = 1000.0; // TODO: assumes plane is > 1000 meters above ground!
+  float error1 = calculateXYZ2( ang1, t1p, ang2, t2p, z1, X, Y, Z );
 
-  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 2.0) {
+  z0 = z0 + ((z1 - z0)/(error1 - error0) * (0 - error0));
+  float min_error = error0;
+//std::cout << "Guess z0: " << z0 << std::endl;
+  int counter = 0;
+  for(z1 = z0; z1 < t1p.at<float>(2); z1 += 1.0) {
     float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
-    //std::cout << z1 << "\t" << error << std::endl;
+//    std::cout << z1 << "\t" << error << std::endl;
+    if(error < min_error) {
+	counter = 0;
+        min_error = error;
+  	*X = X1;  
+  	*Y = Y1;
+  	*Z = Z1;
+    } else  // if 10 in a row are worst than current best then gone to far.
+	if(counter++ > 100)
+		break;
+  } // check other side of estimate
+  counter = 0;
+  for(z1 = z0; z1 > 0; z1 -= 1.0) {
+    float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
+//    std::cout << z1 << "\t" << error << std::endl;
+    if(error < min_error) {
+	counter = 0;
+        min_error = error;
+  	*X = X1;  
+  	*Y = Y1;
+  	*Z = Z1;
+    } else  // if 10 in a row are worst than current best then gone to far.
+	if(counter++ > 100)
+		break;
+  }
+#else
+  float best_z;
+  float min_error = error0;
+  for(float z1 = 1.0; z1 < t1p.at<float>(2); z1 += 1.0) {
+    float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
     if(error < min_error) {
         min_error = error;
+	best_z = z1;
   	*X = X1;  
   	*Y = Y1;
   	*Z = Z1;
     }
   }
+ 	 
+// std::cout << best_z << "\t" << min_error << std::endl;
+#endif
   return;
 }
 
@@ -361,7 +402,7 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 	fftwf_destroy_plan(planI);
 	fftwf_free(img1);
 	fftwf_free(img2);
-
+#if 0
 	fft2shift(out, width, height);
 
 	/* Row and column of image center */
@@ -390,7 +431,40 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 
 	*offset_x = max_col - pp_col;
 	*offset_y = max_row - pp_row;
+#else
+	/* No need to shift image... shift indices is quicker */
 
+	/* Row and column of image center */
+	const int pp_row = height / 2;
+	const int pp_col = width / 2;
+
+	const int height2 = pp_row * 2; /* Avoid odd pixels at end */
+	const int width2 = pp_col * 2; /* image-cross-cor fft2shift has a bug with this */
+
+	/* Find peak response that is outside the mask */
+	float max = -1;
+	int max_col = 0, max_row = 0;
+
+	for(int row = 0; row < height2; row++) {
+		int row_offset = row * width;
+
+		for(int col = 0; col < width2; col++) {
+			float v = out[row_offset + col];
+			if(v > max) {
+				max = v;
+				max_col = col;
+				max_row = row;
+			}
+		}
+	}
+
+	if(max_col > pp_col)
+		max_col = max_col - width;
+	if(max_row > pp_row)
+		max_row = max_row - height;
+	*offset_x = max_col;
+	*offset_y = max_row;
+#endif
 	fftwf_free(out);
 
 	return max;
@@ -569,6 +643,7 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 	       			calcDisparityMap(r1, r2);
 			}
 		}
+#if 0
 	} else if(overlap.width > minSize && overlap.height > minSize && max > 0.75) {
 
 		/* Calculate dense points */
@@ -581,7 +656,19 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 		}	
 		dim = (dim / 2) + (dim % 1);
 		r1.width = r1.height = r2.width = r2.height = dim;
-
+//TODO: do j,i need to go negative?
+		for(int j = 0; j+dim < overlap.height; j=j+1) {
+			int jj = j+dim > overlap.height ? overlap.height - dim : j;
+			for(int i = 0; i+dim < overlap.width; i=i+1) {
+				int ii = i+dim > overlap.width ? overlap.width - dim: i;
+				r1.minx = overlap.minx + ii;
+				r1.miny = overlap.miny + jj;
+				r2.minx = overlap2.minx + ii;
+				r2.miny = overlap2.miny + jj;
+	       			calcDisparityMap(r1, r2);
+			}
+		}
+/*
 		for(int j = 0; j < overlap.height; j+=4) {
 			for(int i = 0; i < overlap.width; i+=4) {
 				r1.minx = overlap.minx + i;
@@ -591,8 +678,10 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 				if(r1.minx + dim < maxx && r2.minx + dim < maxx && r1.miny + dim < maxy && r2.miny + dim < maxy)
 	       				calcDisparityMap(r1, r2);
 			}
-		}
+		} */
+#endif
 	} else {
+
 	  /* Final Answer -- Compute XYZ */
           int u1 = overlap.minx + overlap.width/2;
           int v1 = overlap.miny + overlap.height/2;
@@ -613,8 +702,12 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 	  	bzero(bands, 10*n_bands);
           	for(int band=1; band <= n_bands; band++) {
 			float val;
-		        srcDS1->GetRasterBand(band)->RasterIO( GF_Read, overlap.minx, overlap.miny,
-        	                           overlap.width, overlap.height,
+//		        srcDS1->GetRasterBand(band)->RasterIO( GF_Read, overlap.minx, overlap.miny,
+//        	                           overlap.width, overlap.height,
+//        	                           &val, 1, 1,
+//        	                           GDT_Float32, 0, sizeof(float));
+		        srcDS1->GetRasterBand(band)->RasterIO( GF_Read, u1, v1,
+        	                           1, 1,
         	                           &val, 1, 1,
         	                           GDT_Float32, 0, sizeof(float));
 			int chars = snprintf(bands + bands_len, 10*n_bands - bands_len, "%f ", val);
@@ -631,13 +724,21 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
           if(dstDS) {
 	  	float disparity = sqrtf( total_offset_x*total_offset_x + total_offset_y*total_offset_y );
 	  	dstDS->GetRasterBand(1)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
-						     &disparity, 1, 1, GDT_CFloat32, 0, 0);
+						     &disparity, 1, 1, GDT_Float32, 0, 0);
+	  	dstDS->GetRasterBand(2)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
+						     &total_offset_x, 1, 1, GDT_Int32, 0, 0);
+	  	dstDS->GetRasterBand(3)->RasterIO( GF_Write, bbox1.minx, bbox1.miny, bbox1.width, bbox1.height,
+						     &total_offset_y, 1, 1, GDT_Int32, 0, 0);
           }
 	}
 
 	return 0;
 }
-
+// TODO: change to IDFS, keep track of dim as recursion variable.  Store full results in dstDS (now required).
+//       Grid as usual at each level (can be parallel now) and store new results in dstDS.
+//       Lookup in dstDS for last best know offset_x, offset_y
+//       When dim < threshold then step by 1 instead of dim for grid, store results in dstDS as 1x1 instead of dimxdim.
+//       Run ComputeXYZ by looping over dstDS later as a separate step.
 
 GDALDataset* CreateOutputDataset(char* fileName, int width, int height, int bands)
 {
@@ -776,7 +877,7 @@ int main(int argc, char** argv)
 	bbox2.height = srcDS2->GetRasterYSize();
 
 	if(dstFilename)
-		dstDS = CreateOutputDataset(dstFilename, bbox1.width, bbox1.height, 1);
+		dstDS = CreateOutputDataset(dstFilename, bbox1.width, bbox1.height, 3);
 
 	if(!skipXYZ) {
 		xyzFile = fopen(xyzFilename, "w");

@@ -50,7 +50,7 @@ g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr
 #define MY_MIN(a,b) (a<b)? a : b
 #define MY_MAX(a,b) (a>b)? a : b
 
-int gVERBOSE = 1;
+int gVERBOSE = 0;
 int gWAITKEY = 10;
 
 struct Rect {
@@ -170,13 +170,13 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
 	-(v2 - cy2)/fy2,
 	-1 
   );  
-  std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
+  //std::cout << "ang1: " << ang1 << std::endl << "ang2: " << ang2 << std::endl;  
 
   // Rotate into World CS
   ang1 = R1p * ang1;
   ang2 = R2p * ang2;
 
-  std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
+  //std::cout << "R*ang1: " << ang1 << std::endl << "R*ang2: " << ang2 << std::endl;  
 
 
   // Note this is now a constrained optimization problem...  
@@ -188,7 +188,7 @@ void calculateXYZ(const cv::Mat M1, const cv::Mat R1, const cv::Mat t1,
   float z1 = 0.0; 
   float min_error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, X, Y, Z );
 
-  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 4.0) {
+  for(z1 = 1.0; z1 < t1p.at<float>(2); z1 += 2.0) {
     float error = calculateXYZ2( ang1, t1p, ang2, t2p, z1, &X1, &Y1, &Z1 );
     //std::cout << z1 << "\t" << error << std::endl;
     if(error < min_error) {
@@ -545,7 +545,7 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 	  displayMatch(bbox1, bbox2, total_offset_x, total_offset_y);
 
 	/* Termination condition */
-	if(overlap.width > minSize && overlap.height > minSize && max > 0.75) {
+	if(overlap.width > 2*minSize && overlap.height > 2*minSize && max > 0.75) {
 
 		/* Operators -- Grid and compute again */
 		int dim = MY_MIN(overlap.width, overlap.height);
@@ -568,7 +568,30 @@ int calcDisparityMap(const struct Rect bbox1, const struct Rect bbox2)
 				r2.miny = overlap2.miny + jj;
 	       			calcDisparityMap(r1, r2);
 			}
-		}				
+		}
+	} else if(overlap.width > minSize && overlap.height > minSize && max > 0.75) {
+
+		/* Calculate dense points */
+		int dim = MY_MIN(overlap.width, overlap.height);
+		{ /* Force to be a power of two makes the following loop more efficient */
+			unsigned char r = 0;
+			while( dim >>= 1 )
+				r++;
+			dim = 1 << r;
+		}	
+		dim = (dim / 2) + (dim % 1);
+		r1.width = r1.height = r2.width = r2.height = dim;
+
+		for(int j = 0; j < overlap.height; j+=4) {
+			for(int i = 0; i < overlap.width; i+=4) {
+				r1.minx = overlap.minx + i;
+				r1.miny = overlap.miny + j;
+				r2.minx = overlap2.minx + i;
+				r2.miny = overlap2.miny + j;
+				if(r1.minx + dim < maxx && r2.minx + dim < maxx && r1.miny + dim < maxy && r2.miny + dim < maxy)
+	       				calcDisparityMap(r1, r2);
+			}
+		}
 	} else {
 	  /* Final Answer -- Compute XYZ */
           int u1 = overlap.minx + overlap.width/2;
@@ -649,6 +672,7 @@ void usage() {
 	printf("\t--cores=[number]           Maximum number of threads to use during processing. (default #CPU cores)\n");
 	printf("\n");
 	printf("\t--xyz=[output_file]        ASCII XYZ file to store point cloud.\n");
+	printf("\t--verbose                  Show internal state.\n");
 	printf("\t--help                     Print this message and exit.\n");
 }
 
@@ -660,7 +684,7 @@ int main(int argc, char** argv)
 	char* xyzFilename = NULL;
 	int cores = CORES;
 
-	static const char *optString = "m:d:x:a:s:c:h";
+	static const char *optString = "m:d:x:a:s:c:v:h";
 	static const struct option longOpts[] = {
 		{ "min-size", required_argument, NULL, 'm' },
 		{ "dispersion", required_argument, NULL, 'd' },
@@ -668,6 +692,7 @@ int main(int argc, char** argv)
 		{ "anaglyph", required_argument, NULL, 'a' },
 		{ "anaglyph-size", required_argument, NULL, 's' },
 		{ "cores", required_argument, NULL, 'c'},
+		{ "verbose", no_argument, NULL, 'v'},
 		{ "help", no_argument, NULL, 'h'},
 		{ NULL, no_argument, NULL, 0 }
 	};
@@ -694,6 +719,9 @@ int main(int argc, char** argv)
 				break;
 			case 'c':
 				cores = atoi( optarg );
+				break;
+			case 'v':
+				gVERBOSE = 1;
 				break;
 			case 'h':
 				usage();

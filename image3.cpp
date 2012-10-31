@@ -539,6 +539,89 @@ void displayMatch(struct Rect bbox1, struct Rect bbox2, int offset_x, int offset
   snprintf(saveName, 1024, "%s_%d-%d_%d.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
   cv::imwrite(saveName, img);
 
+  /* Save L and R color images */
+  im[0] = cv::Mat::zeros(height, width, CV_8U);
+  im[1] = cv::Mat::zeros(height, width, CV_8U);
+  im[2] = cv::Mat::zeros(height, width, CV_8U);
+
+  img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  unsigned char* img3 = (unsigned char*)malloc(sizeof(unsigned char) * bbox1.width * bbox1.height);
+  srcDS1->GetRasterBand(3)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img1, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+  srcDS1->GetRasterBand(2)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img2, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+  srcDS1->GetRasterBand(1)->RasterIO( GF_Read, bbox1.minx, bbox1.miny, 
+				   bbox1.width, bbox1.height,
+				   img3, bbox1.width, bbox1.height,
+				   GDT_Byte, 0, 0);
+
+  dx = bbox1.minx - minx;
+  dy = bbox1.miny - miny;
+  for(int y = 0; y < bbox1.height; y++) {
+    for(int x = 0; x < bbox1.width; x++) {
+      int px = x + y*bbox1.width;
+      unsigned char px_val = img1[px];
+      im[0].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img2[px];
+      im[1].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img3[px];
+      im[2].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img1);
+  free(img2);
+  free(img3);
+  snprintf(saveName, 1024, "%s_%d-%d_%d-l.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
+  img = cv::Mat(height, width, CV_8UC3);
+  cv::merge(im, img);
+  cv::imwrite(saveName, img);
+
+  /* R */
+  im[0] = cv::Mat::zeros(height, width, CV_8U);
+  im[1] = cv::Mat::zeros(height, width, CV_8U);
+  im[2] = cv::Mat::zeros(height, width, CV_8U);
+  img1 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  img2 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  img3 = (unsigned char*)malloc(sizeof(unsigned char) * bbox2.width * bbox2.height);
+  srcDS2->GetRasterBand(3)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
+				   bbox2.width, bbox2.height,
+				   img1, bbox2.width, bbox2.height,
+				   GDT_Byte, 0, 0);
+  srcDS2->GetRasterBand(2)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
+				   bbox2.width, bbox2.height,
+				   img2, bbox2.width, bbox2.height,
+				   GDT_Byte, 0, 0);
+  srcDS2->GetRasterBand(1)->RasterIO( GF_Read, bbox2.minx, bbox2.miny, 
+				   bbox2.width, bbox2.height,
+				   img3, bbox2.width, bbox2.height,
+				   GDT_Byte, 0, 0);
+
+  dx = bbox2.minx+offset_x - minx;
+  dy = bbox2.miny+offset_y - miny;
+  for(int y = 0; y < bbox2.height; y++) {
+    for(int x = 0; x < bbox2.width; x++) {
+      int px = x + y*bbox2.width;
+      unsigned char px_val = img1[px];
+      im[0].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img2[px];
+      im[1].at<unsigned char>(y+dy, x+dx) = px_val;
+      px_val = img3[px];
+      im[2].at<unsigned char>(y+dy, x+dx) = px_val;
+    }
+  }
+  free(img1);
+  free(img2);
+  free(img3);
+  snprintf(saveName, 1024, "%s_%d-%d_%d-r.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
+  img = cv::Mat(height, width, CV_8UC3);
+  cv::merge(im, img);
+  cv::imwrite(saveName, img);
+
   cv::waitKey(gWAITKEY);
 }
 

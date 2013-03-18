@@ -52,6 +52,7 @@ g++ -lgdal1.6.0 -lproj -lfftw3f -lfftw3f_threads -lm image3.cpp -o image3 -I/usr
 
 int gVERBOSE = 0;
 int gWAITKEY = 10;
+int bMaskCenter = 0;
 
 struct Rect {
 	int minx;
@@ -443,20 +444,45 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 
 	/* Find peak response that is outside the mask */
 	float max = -1;
+	float max_out = -1;
 	int max_col = 0, max_row = 0;
 
+
+	cv::Mat imout = cv::Mat::zeros(height, width, CV_32F);
+	for(int row = 0; row < height2; row++) {
+		int row_offset = row * width;
+		for(int col = 0; col < width2; col++) {
+			float v = out[row_offset + col];
+			imout.at<float>(row,col) = v;
+		}
+	}
+	cv::Mat imout_g1 = cv::Mat::zeros(height, width, CV_32F);
+	cv::Mat imout_g2 = cv::Mat::zeros(height, width, CV_32F);
+	cv::GaussianBlur( imout, imout_g1, cv::Size( 151, 151 ), 99.0 );
+	//cv::GaussianBlur( imout, imout_g2, cv::Size( 151, 151 ),  3.0 );
+	imout_g2 = imout - imout_g1;
+	
+  	imout = cv::Mat::zeros(height, width, CV_8U);
 	for(int row = 0; row < height2; row++) {
 		int row_offset = row * width;
 
 		for(int col = 0; col < width2; col++) {
-			float v = out[row_offset + col];
-			if(v > max) {
+			float v = imout_g2.at<float>(row, col); /* find peak in DoG image */
+			float v2 = out[row_offset + col];
+
+			imout.at<unsigned char>(row,col) = (unsigned char)(v*255);
+			if(v > max && !(bMaskCenter && (col < 2000 || col > width2-2000))) {// && (row < 1500 || row > height2-1500))) {
 				max = v;
+				max_out = v2; /* return the orig probability */
 				max_col = col;
 				max_row = row;
 			}
 		}
 	}
+	bMaskCenter = 0;
+	char saveName[1024];
+  	snprintf(saveName, 1024, "%s_%d-%d_%d-f.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
+  	cv::imwrite(saveName, imout);
 
 	if(max_col > pp_col)
 		max_col = max_col - width;
@@ -467,7 +493,7 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 #endif
 	fftwf_free(out);
 
-	return max;
+	return max_out;
 }
 
 

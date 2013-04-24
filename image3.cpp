@@ -462,7 +462,7 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 	//cv::GaussianBlur( imout, imout_g2, cv::Size( 151, 151 ),  3.0 );
 	imout_g2 = imout - imout_g1;
 	
-  	imout = cv::Mat::zeros(height, width, CV_8U);
+  	//imout = cv::Mat::zeros(height, width, CV_8U);
 	for(int row = 0; row < height2; row++) {
 		int row_offset = row * width;
 
@@ -470,7 +470,7 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 			float v = imout_g2.at<float>(row, col); /* find peak in DoG image */
 			float v2 = out[row_offset + col];
 
-			imout.at<unsigned char>(row,col) = (unsigned char)(v*255);
+			//imout.at<unsigned char>(row,col) = (unsigned char)(v*255);
 			if(v > max && !(bMaskCenter && (col < 2000 || col > width2-2000))) {// && (row < 1500 || row > height2-1500))) {
 				max = v;
 				max_out = v2; /* return the orig probability */
@@ -480,9 +480,9 @@ float findOffset(struct Rect bbox1, struct Rect bbox2, int width, int height, in
 		}
 	}
 	bMaskCenter = 0;
-	char saveName[1024];
-  	snprintf(saveName, 1024, "%s_%d-%d_%d-f.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
-  	cv::imwrite(saveName, imout);
+	//char saveName[1024];
+  	//snprintf(saveName, 1024, "%s_%d-%d_%d-f.jpg", anaglyphBasename, bbox1.width, bbox1.minx, bbox1.miny);
+  	//cv::imwrite(saveName, imout);
 
 	if(max_col > pp_col)
 		max_col = max_col - width;
